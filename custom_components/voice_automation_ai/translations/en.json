@@ -41,5 +41,25 @@
     "abort": {
       "already_configured": "This integration is already configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Voice Automation AI Options",
+        "description": "Adjust runtime settings. Connection details can only be changed by re-adding the integration.",
+        "data": {
+          "model": "Model",
+          "language": "Language",
+          "max_tokens": "Max Response Tokens",
+          "max_history_turns": "Conversation History Turns"
+        },
+        "data_description": {
+          "model": "Which LLM model to use for responses",
+          "language": "Language for AI responses",
+          "max_tokens": "Maximum tokens per LLM response (256-32768)",
+          "max_history_turns": "Number of conversation turns to remember (1-50)"
+        }
+      }
+    }
   }
 }

@@ -29,6 +29,14 @@ DEFAULT_OLLAMA_MODEL = "llama3.1"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_LANGUAGE = "en"
 
+# Options keys (runtime-tunable via Options Flow)
+CONF_MAX_TOKENS = "max_tokens"
+CONF_MAX_HISTORY_TURNS = "max_history_turns"
+
+# Defaults for options
+DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_HISTORY_TURNS = 10
+
 # Available Anthropic models
 ANTHROPIC_MODELS = {
     "claude-sonnet-4-5-20250929": "Claude Sonnet 4.5 (Recommended)",
@@ -87,4 +95,64 @@ ATTR_SCENE_ID = "scene_id"
 # API
 API_TIMEOUT = 30
 OLLAMA_TIMEOUT = 120
-MAX_TOKENS = 4096
+MAX_TOKENS = DEFAULT_MAX_TOKENS
+
+# ── Security: service call restrictions ──
+
+# Domains the LLM is allowed to call via call_service
+ALLOWED_SERVICE_DOMAINS = {
+    "light",
+    "switch",
+    "climate",
+    "cover",
+    "lock",
+    "fan",
+    "media_player",
+    "vacuum",
+    "scene",
+    "script",
+    "input_boolean",
+    "input_number",
+    "input_select",
+    "input_text",
+    "input_button",
+    "input_datetime",
+    "number",
+    "select",
+    "button",
+    "siren",
+    "water_heater",
+    "humidifier",
+    "remote",
+    "alarm_control_panel",
+}
+
+# Domains that must NEVER be called (even if added to allowlist by mistake)
+BLOCKED_SERVICE_DOMAINS = {
+    "shell_command",
+    "rest_command",
+    "python_script",
+    "homeassistant",
+    "system_log",
+    "hassio",
+    "addon",
+    "recorder",
+    "logger",
+}
+
+# Sensitive entity attribute keys to strip from get_entity_state responses
+SENSITIVE_ATTRIBUTE_KEYS = {
+    "latitude",
+    "longitude",
+    "gps_accuracy",
+    "token",
+    "access_token",
+    "api_key",
+    "api_token",
+    "password",
+    "secret",
+    "stream_source",
+    "entity_picture",
+    "ip_address",
+    "mac_address",
+}

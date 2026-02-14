@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from collections import OrderedDict
 from typing import Any
 
 import yaml
@@ -18,20 +20,26 @@ from homeassistant.helpers import intent
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    ALLOWED_SERVICE_DOMAINS,
     API_TIMEOUT,
+    BLOCKED_SERVICE_DOMAINS,
     CONF_API_KEY,
     CONF_LANGUAGE,
+    CONF_MAX_HISTORY_TURNS,
+    CONF_MAX_TOKENS,
     CONF_MODEL,
     CONF_OLLAMA_HOST,
     CONF_PROVIDER,
     DEFAULT_LANGUAGE,
+    DEFAULT_MAX_HISTORY_TURNS,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_PROVIDER,
     DOMAIN,
-    MAX_TOKENS,
     OLLAMA_TIMEOUT,
     PROVIDER_ANTHROPIC,
+    SENSITIVE_ATTRIBUTE_KEYS,
 )
 from .file_manager import HAConfigFileManager
 from .llm_client import BaseLLMClient, create_llm_client
@@ -40,6 +48,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # Maximum number of tool-use round-trips per conversation turn
 MAX_TOOL_ROUNDS = 5
+
+# Maximum number of concurrent conversations to track
+MAX_CONVERSATIONS = 50
 
 SYSTEM_PROMPT = """You are a Home Assistant smart home assistant. You can control \
 devices and manage automations, scripts, and scenes.
@@ -90,6 +101,8 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         self.hass = hass
         self._config_entry = config_entry
         self._attr_unique_id = f"{config_entry.entry_id}_conversation"
+        # Conversation history keyed by conversation_id
+        self._conversations: OrderedDict[str, list[dict]] = OrderedDict()
 
     @property
     def supported_languages(self) -> str:
@@ -132,28 +145,48 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         config = self._config
         model = config.get(CONF_MODEL, DEFAULT_MODEL)
         language = config.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+        max_tokens = config.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+        max_history_turns = config.get(CONF_MAX_HISTORY_TURNS, DEFAULT_MAX_HISTORY_TURNS)
+
+        # Resolve or create conversation ID
+        conversation_id = user_input.conversation_id or str(uuid.uuid4())
 
         entities_context = await self.hass.async_add_executor_job(
             self._file_manager.get_entities_context
         )
         system_prompt = SYSTEM_PROMPT.format(entities=entities_context)
 
-        messages = [{"role": "user", "content": user_input.text}]
+        # Retrieve existing history or start fresh
+        messages = list(self._conversations.get(conversation_id, []))
+        messages.append({"role": "user", "content": user_input.text})
 
         try:
             client = self._create_llm_client()
             response_text = await self._call_with_tools(
-                client, model, system_prompt, messages
+                client, model, system_prompt, messages, max_tokens
             )
         except Exception as err:
             _LOGGER.error("Error in conversation: %s", err)
             response_text = f"Sorry, I encountered an error: {err}"
 
+        # Append assistant reply to history
+        messages.append({"role": "assistant", "content": response_text})
+
+        # Trim history to keep token usage bounded
+        if len(messages) > max_history_turns * 2:
+            messages = messages[-(max_history_turns * 2):]
+
+        # Store updated history, evicting oldest conversation if needed
+        self._conversations[conversation_id] = messages
+        self._conversations.move_to_end(conversation_id)
+        while len(self._conversations) > MAX_CONVERSATIONS:
+            self._conversations.popitem(last=False)
+
         intent_response = intent.IntentResponse(language=language)
         intent_response.async_set_speech(response_text)
 
         return ConversationResult(
-            conversation_id=user_input.conversation_id,
+            conversation_id=conversation_id,
             response=intent_response,
         )
 
@@ -163,6 +196,7 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         model: str,
         system_prompt: str,
         messages: list[dict],
+        max_tokens: int,
     ) -> str:
         """Call LLM with tool-use support, handling tool calls in a loop."""
 
@@ -171,7 +205,7 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 model=model,
                 system_prompt=system_prompt,
                 messages=msgs,
-                max_tokens=MAX_TOKENS,
+                max_tokens=max_tokens,
                 tools=True,
             )
 
@@ -195,6 +229,19 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
 
         return "I completed the requested operations."
 
+    @staticmethod
+    def _check_yaml_for_blocked_services(data: dict | list) -> str | None:
+        """Scan parsed YAML for references to blocked service domains.
+
+        Returns an error message if a blocked service is found, else None.
+        """
+        text = yaml.dump(data, default_flow_style=False)
+        for domain in BLOCKED_SERVICE_DOMAINS:
+            # Check for "service: domain." or "domain.service_name" patterns
+            if f"service: {domain}." in text or f" {domain}." in text:
+                return f"Blocked: generated YAML references restricted service domain '{domain}'."
+        return None
+
     async def _execute_tool(self, tool_name: str, tool_input: dict) -> dict:
         """Execute a tool call and return the result."""
         fm = self._file_manager
@@ -212,6 +259,9 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 data = yaml.safe_load(tool_input["yaml_content"])
                 if isinstance(data, list):
                     data = data[0]
+                blocked = self._check_yaml_for_blocked_services(data)
+                if blocked:
+                    return {"success": False, "error": blocked}
                 automation_id = await fm.add_automation(data)
                 return {
                     "success": True,
@@ -223,6 +273,9 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 data = yaml.safe_load(tool_input["yaml_content"])
                 if isinstance(data, list):
                     data = data[0]
+                blocked = self._check_yaml_for_blocked_services(data)
+                if blocked:
+                    return {"success": False, "error": blocked}
                 await fm.update_automation(tool_input["automation_id"], data)
                 return {"success": True, "automation_id": tool_input["automation_id"]}
 
@@ -240,11 +293,17 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
 
             elif tool_name == "create_script":
                 data = yaml.safe_load(tool_input["yaml_content"])
+                blocked = self._check_yaml_for_blocked_services(data)
+                if blocked:
+                    return {"success": False, "error": blocked}
                 name = await fm.add_script(tool_input["script_name"], data)
                 return {"success": True, "script_name": name}
 
             elif tool_name == "edit_script":
                 data = yaml.safe_load(tool_input["yaml_content"])
+                blocked = self._check_yaml_for_blocked_services(data)
+                if blocked:
+                    return {"success": False, "error": blocked}
                 await fm.update_script(tool_input["script_name"], data)
                 return {"success": True, "script_name": tool_input["script_name"]}
 
@@ -286,6 +345,28 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 domain = tool_input["domain"]
                 service = tool_input["service"]
                 entity_id = tool_input["entity_id"]
+
+                # Security: block dangerous service domains
+                if domain in BLOCKED_SERVICE_DOMAINS:
+                    _LOGGER.warning(
+                        "Blocked call to restricted domain: %s.%s", domain, service
+                    )
+                    return {
+                        "success": False,
+                        "error": f"Service domain '{domain}' is restricted for security reasons.",
+                    }
+                if domain not in ALLOWED_SERVICE_DOMAINS:
+                    _LOGGER.warning(
+                        "Blocked call to non-allowlisted domain: %s.%s", domain, service
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Service domain '{domain}' is not in the allowed list. "
+                            f"Allowed: {', '.join(sorted(ALLOWED_SERVICE_DOMAINS))}"
+                        ),
+                    }
+
                 service_data = {}
                 if "service_data" in tool_input and tool_input["service_data"]:
                     service_data = json.loads(tool_input["service_data"])
@@ -305,11 +386,17 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 state = self.hass.states.get(entity_id)
                 if state is None:
                     return {"success": False, "error": f"Entity '{entity_id}' not found"}
+                # Security: strip sensitive attributes before sending to LLM
+                safe_attrs = {
+                    k: v
+                    for k, v in state.attributes.items()
+                    if k.lower() not in SENSITIVE_ATTRIBUTE_KEYS
+                }
                 return {
                     "success": True,
                     "entity_id": entity_id,
                     "state": state.state,
-                    "attributes": dict(state.attributes),
+                    "attributes": safe_attrs,
                 }
 
             else:

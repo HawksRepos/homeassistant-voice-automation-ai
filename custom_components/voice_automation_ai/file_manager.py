@@ -7,11 +7,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+import re
+
 import yaml
 
 from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+# Pattern for valid HA entity IDs: domain.object_id (alphanumeric + underscores)
+_ENTITY_ID_PATTERN = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
 
 class HAConfigFileManager:
@@ -250,17 +255,45 @@ class HAConfigFileManager:
             _LOGGER.warning("Failed to reload %s - a manual reload may be needed", domain)
 
     def get_entities_context(self) -> str:
-        """Get a summary of all available entities for Claude context."""
+        """Get a compact summary of available entities for LLM context.
+
+        Prioritizes controllable domains and limits output to keep token
+        usage reasonable (~2000 tokens instead of 10,000+).
+        """
         states = self._hass.states.async_all()
 
         entities_by_domain: dict[str, list[str]] = {}
         for state in states:
-            domain = state.entity_id.split(".")[0]
-            entities_by_domain.setdefault(domain, []).append(state.entity_id)
+            entity_id = state.entity_id
+            # Sanitize: skip entity IDs that don't match the expected pattern
+            # This prevents prompt injection via crafted entity names
+            if not _ENTITY_ID_PATTERN.match(entity_id):
+                _LOGGER.debug("Skipping malformed entity ID: %r", entity_id)
+                continue
+            domain = entity_id.split(".")[0]
+            entities_by_domain.setdefault(domain, []).append(entity_id)
+
+        # Controllable domains first (most useful for voice control)
+        priority_domains = [
+            "light", "switch", "climate", "cover", "lock", "fan",
+            "media_player", "vacuum", "camera", "scene", "script",
+        ]
+        # Info domains (useful for status queries)
+        info_domains = ["sensor", "binary_sensor", "person", "weather"]
 
         lines = []
-        for domain in sorted(entities_by_domain):
-            entities = entities_by_domain[domain]
-            lines.append(f"{domain}: {', '.join(entities)}")
+        for domain in priority_domains:
+            if domain in entities_by_domain:
+                entities = entities_by_domain[domain]
+                lines.append(f"{domain}: {', '.join(entities)}")
+
+        for domain in info_domains:
+            if domain in entities_by_domain:
+                entities = entities_by_domain[domain]
+                # Limit info domains to 20 entities to save tokens
+                if len(entities) > 20:
+                    lines.append(f"{domain}: {', '.join(entities[:20])} (and {len(entities) - 20} more)")
+                else:
+                    lines.append(f"{domain}: {', '.join(entities)}")
 
         return "\n".join(lines) if lines else "No entities available"

@@ -22,17 +22,21 @@ from .const import (
     ATTR_SCRIPT_NAME,
     ATTR_VALIDATE_ONLY,
     ATTR_YAML_CONTENT,
+    BLOCKED_SERVICE_DOMAINS,
     CONF_API_KEY,
     CONF_LANGUAGE,
+    CONF_MAX_HISTORY_TURNS,
+    CONF_MAX_TOKENS,
     CONF_MODEL,
     CONF_OLLAMA_HOST,
     CONF_PROVIDER,
     DEFAULT_LANGUAGE,
+    DEFAULT_MAX_HISTORY_TURNS,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_PROVIDER,
     DOMAIN,
-    MAX_TOKENS,
     OLLAMA_TIMEOUT,
     PLATFORMS,
     PROVIDER_ANTHROPIC,
@@ -118,12 +122,65 @@ def _build_llm_client_kwargs(config: dict) -> dict:
     }
 
 
+def _check_yaml_for_blocked_services(data: dict | list) -> str | None:
+    """Scan parsed YAML for references to blocked service domains.
+
+    Returns an error message if a blocked service is found, else None.
+    """
+    text = yaml.dump(data, default_flow_style=False)
+    for domain in BLOCKED_SERVICE_DOMAINS:
+        if f"service: {domain}." in text or f" {domain}." in text:
+            return f"Generated YAML references restricted service domain '{domain}'."
+    return None
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate old config entries to current schema."""
+    _LOGGER.debug(
+        "Migrating Voice Automation AI config entry from version %s",
+        config_entry.version,
+    )
+
+    if config_entry.version > 3:
+        # Cannot downgrade from a future version
+        return False
+
+    if config_entry.version == 1:
+        # VERSION 1 -> 2: Add provider field (was Anthropic-only)
+        new_data = {**config_entry.data}
+        new_data.setdefault(CONF_PROVIDER, PROVIDER_ANTHROPIC)
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=2
+        )
+        _LOGGER.info("Migrated config entry to version 2 (added provider field)")
+
+    if config_entry.version == 2:
+        # VERSION 2 -> 3: Seed runtime settings into options
+        new_data = {**config_entry.data}
+        new_options = {**config_entry.options}
+        new_options.setdefault(CONF_MODEL, new_data.get(CONF_MODEL, DEFAULT_MODEL))
+        new_options.setdefault(CONF_LANGUAGE, new_data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE))
+        new_options.setdefault(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+        new_options.setdefault(CONF_MAX_HISTORY_TURNS, DEFAULT_MAX_HISTORY_TURNS)
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, options=new_options, version=3
+        )
+        _LOGGER.info("Migrated config entry to version 3 (moved runtime settings to options)")
+
+    return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload integration when options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Voice Automation AI from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Store full configuration (provider-agnostic)
-    hass.data[DOMAIN][entry.entry_id] = dict(entry.data)
+    # Merge: entry.data provides connection details, entry.options overrides runtime settings
+    hass.data[DOMAIN][entry.entry_id] = {**entry.data, **entry.options}
 
     # Create shared file manager
     if "file_manager" not in hass.data[DOMAIN]:
@@ -149,6 +206,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             automation_data = yaml.safe_load(automation_yaml)
             if isinstance(automation_data, list):
                 automation_data = automation_data[0]
+
+            # Security: reject automations that call blocked services
+            blocked = _check_yaml_for_blocked_services(automation_data)
+            if blocked:
+                raise HomeAssistantError(blocked)
 
             if preview or validate_only:
                 _LOGGER.info("Automation preview/validate: %s", automation_data.get("alias", "Unknown"))
@@ -185,6 +247,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
             script_data = yaml.safe_load(script_yaml)
+
+            # Security: reject scripts that call blocked services
+            blocked = _check_yaml_for_blocked_services(script_data)
+            if blocked:
+                raise HomeAssistantError(blocked)
+
             if not script_name:
                 script_name = script_data.get("alias", f"script_{int(time.time())}")
                 script_name = script_name.lower().replace(" ", "_").replace("-", "_")
@@ -212,6 +280,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             scene_data = yaml.safe_load(scene_yaml)
             if isinstance(scene_data, list):
                 scene_data = scene_data[0]
+
+            # Security: reject scenes that reference blocked services
+            blocked = _check_yaml_for_blocked_services(scene_data)
+            if blocked:
+                raise HomeAssistantError(blocked)
 
             await fm.add_scene(scene_data)
             _LOGGER.info("Scene created: %s", scene_data.get("name", "Unknown"))
@@ -250,6 +323,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if isinstance(updated_data, list):
                 updated_data = updated_data[0]
 
+            # Security: reject automations that call blocked services
+            blocked = _check_yaml_for_blocked_services(updated_data)
+            if blocked:
+                raise HomeAssistantError(blocked)
+
             await fm.update_automation(automation_id, updated_data)
             _LOGGER.info("Automation updated: %s", automation_id)
 
@@ -279,6 +357,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fm.get_entities_context(),
             )
             updated_data = yaml.safe_load(updated_yaml)
+
+            # Security: reject scripts that call blocked services
+            blocked = _check_yaml_for_blocked_services(updated_data)
+            if blocked:
+                raise HomeAssistantError(blocked)
+
             await fm.update_script(script_name, updated_data)
             _LOGGER.info("Script updated: %s", script_name)
 
@@ -313,6 +397,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             updated_data = yaml.safe_load(updated_yaml)
             if isinstance(updated_data, list):
                 updated_data = updated_data[0]
+
+            # Security: reject scenes that reference blocked services
+            blocked = _check_yaml_for_blocked_services(updated_data)
+            if blocked:
+                raise HomeAssistantError(blocked)
 
             await fm.update_scene(scene_id, updated_data)
             _LOGGER.info("Scene updated: %s", scene_id)
@@ -380,6 +469,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     for service_name, handler, schema in services:
         hass.services.async_register(DOMAIN, service_name, handler, schema=schema)
+
+    # Reload integration when options change
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     # Forward setup to conversation platform
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -463,11 +555,13 @@ def _generate_yaml(
     prompt += f"Available entities:\n{entities_context}\n\n"
     prompt += f"Respond in {language}."
 
+    max_tokens = config.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+
     try:
         text = client.create_simple_message(
             model=model,
             prompt=prompt,
-            max_tokens=MAX_TOKENS,
+            max_tokens=max_tokens,
         )
 
         # Clean up markdown code blocks if present

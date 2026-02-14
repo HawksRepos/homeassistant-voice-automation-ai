@@ -5,7 +5,6 @@ import logging
 import time
 from typing import Any
 
-import anthropic
 import voluptuous as vol
 import yaml
 
@@ -26,11 +25,17 @@ from .const import (
     CONF_API_KEY,
     CONF_LANGUAGE,
     CONF_MODEL,
+    CONF_OLLAMA_HOST,
+    CONF_PROVIDER,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_PROVIDER,
     DOMAIN,
     MAX_TOKENS,
+    OLLAMA_TIMEOUT,
     PLATFORMS,
+    PROVIDER_ANTHROPIC,
     SERVICE_CREATE_AUTOMATION,
     SERVICE_CREATE_SCENE,
     SERVICE_CREATE_SCRIPT,
@@ -46,6 +51,7 @@ from .const import (
     SERVICE_VALIDATE_AUTOMATION,
 )
 from .file_manager import HAConfigFileManager
+from .llm_client import create_llm_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,16 +104,26 @@ DELETE_SCENE_SCHEMA = vol.Schema({
 })
 
 
+def _build_llm_client_kwargs(config: dict) -> dict:
+    """Build kwargs for create_llm_client from a config dict."""
+    provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
+    if provider == PROVIDER_ANTHROPIC:
+        return {
+            "api_key": config[CONF_API_KEY],
+            "timeout": API_TIMEOUT,
+        }
+    return {
+        "host": config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+        "timeout": OLLAMA_TIMEOUT,
+    }
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Voice Automation AI from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Store configuration
-    hass.data[DOMAIN][entry.entry_id] = {
-        CONF_API_KEY: entry.data[CONF_API_KEY],
-        CONF_MODEL: entry.data.get(CONF_MODEL, DEFAULT_MODEL),
-        CONF_LANGUAGE: entry.data.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
-    }
+    # Store full configuration (provider-agnostic)
+    hass.data[DOMAIN][entry.entry_id] = dict(entry.data)
 
     # Create shared file manager
     if "file_manager" not in hass.data[DOMAIN]:
@@ -126,12 +142,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             config = hass.data[DOMAIN][entry.entry_id]
             automation_yaml = await hass.async_add_executor_job(
-                _generate_yaml,
-                config[CONF_API_KEY],
-                config[CONF_MODEL],
-                config[CONF_LANGUAGE],
-                description,
-                "automation",
+                _generate_yaml, config, description, "automation",
                 fm.get_entities_context(),
             )
 
@@ -169,12 +180,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             config = hass.data[DOMAIN][entry.entry_id]
             script_yaml = await hass.async_add_executor_job(
-                _generate_yaml,
-                config[CONF_API_KEY],
-                config[CONF_MODEL],
-                config[CONF_LANGUAGE],
-                description,
-                "script",
+                _generate_yaml, config, description, "script",
                 fm.get_entities_context(),
             )
 
@@ -199,12 +205,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             config = hass.data[DOMAIN][entry.entry_id]
             scene_yaml = await hass.async_add_executor_job(
-                _generate_yaml,
-                config[CONF_API_KEY],
-                config[CONF_MODEL],
-                config[CONF_LANGUAGE],
-                description,
-                "scene",
+                _generate_yaml, config, description, "scene",
                 fm.get_entities_context(),
             )
 
@@ -242,12 +243,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 f"Return the complete updated automation as YAML."
             )
             updated_yaml = await hass.async_add_executor_job(
-                _generate_yaml,
-                config[CONF_API_KEY],
-                config[CONF_MODEL],
-                config[CONF_LANGUAGE],
-                edit_prompt,
-                "automation",
+                _generate_yaml, config, edit_prompt, "automation",
                 fm.get_entities_context(),
             )
             updated_data = yaml.safe_load(updated_yaml)
@@ -279,12 +275,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 f"Return the complete updated script body as YAML."
             )
             updated_yaml = await hass.async_add_executor_job(
-                _generate_yaml,
-                config[CONF_API_KEY],
-                config[CONF_MODEL],
-                config[CONF_LANGUAGE],
-                edit_prompt,
-                "script",
+                _generate_yaml, config, edit_prompt, "script",
                 fm.get_entities_context(),
             )
             updated_data = yaml.safe_load(updated_yaml)
@@ -316,12 +307,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 f"Return the complete updated scene as YAML."
             )
             updated_yaml = await hass.async_add_executor_job(
-                _generate_yaml,
-                config[CONF_API_KEY],
-                config[CONF_MODEL],
-                config[CONF_LANGUAGE],
-                edit_prompt,
-                "scene",
+                _generate_yaml, config, edit_prompt, "scene",
                 fm.get_entities_context(),
             )
             updated_data = yaml.safe_load(updated_yaml)
@@ -403,10 +389,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    # Unload conversation platform
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-    # Remove services
     all_services = [
         SERVICE_CREATE_AUTOMATION, SERVICE_VALIDATE_AUTOMATION,
         SERVICE_CREATE_SCRIPT, SERVICE_CREATE_SCENE,
@@ -417,10 +401,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     for service_name in all_services:
         hass.services.async_remove(DOMAIN, service_name)
 
-    # Clean up entry data
     hass.data[DOMAIN].pop(entry.entry_id, None)
 
-    # Remove file manager if no more entries
     remaining_entries = [
         key for key in hass.data[DOMAIN] if key != "file_manager"
     ]
@@ -431,14 +413,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 def _generate_yaml(
-    api_key: str,
-    model: str,
-    language: str,
+    config: dict,
     description: str,
     config_type: str,
     entities_context: str,
 ) -> str:
-    """Generate YAML using Claude API (blocking - called from executor)."""
+    """Generate YAML using the configured LLM provider (blocking - called from executor)."""
+    provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
+    model = config.get(CONF_MODEL, DEFAULT_MODEL)
+    language = config.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+
+    client = create_llm_client(provider, **_build_llm_client_kwargs(config))
+
     prompts = {
         "automation": (
             "Generate a Home Assistant automation in YAML format for this request:\n\n"
@@ -477,26 +463,21 @@ def _generate_yaml(
     prompt += f"Available entities:\n{entities_context}\n\n"
     prompt += f"Respond in {language}."
 
-    client = anthropic.Anthropic(api_key=api_key)
-
     try:
-        message = client.messages.create(
+        text = client.create_simple_message(
             model=model,
+            prompt=prompt,
             max_tokens=MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=API_TIMEOUT,
         )
 
-        yaml_content = message.content[0].text.strip()
-
         # Clean up markdown code blocks if present
-        if yaml_content.startswith("```"):
-            lines = yaml_content.split("\n")
-            yaml_content = "\n".join(lines[1:-1]) if len(lines) > 2 else yaml_content
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
 
-        yaml_content = yaml_content.replace("```yaml", "").replace("```", "").strip()
-        return yaml_content
+        text = text.replace("```yaml", "").replace("```", "").strip()
+        return text
 
     except Exception as err:
-        _LOGGER.error("Error calling Claude API: %s", err)
+        _LOGGER.error("Error calling LLM API: %s", err)
         raise HomeAssistantError(f"Failed to generate YAML: {err}") from err

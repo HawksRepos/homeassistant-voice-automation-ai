@@ -5,7 +5,6 @@ import json
 import logging
 from typing import Any
 
-import anthropic
 import yaml
 
 from homeassistant.components.conversation import (
@@ -19,219 +18,55 @@ from homeassistant.helpers import intent
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    API_TIMEOUT,
     CONF_API_KEY,
     CONF_LANGUAGE,
     CONF_MODEL,
+    CONF_OLLAMA_HOST,
+    CONF_PROVIDER,
     DEFAULT_LANGUAGE,
     DEFAULT_MODEL,
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_PROVIDER,
     DOMAIN,
     MAX_TOKENS,
+    OLLAMA_TIMEOUT,
+    PROVIDER_ANTHROPIC,
 )
 from .file_manager import HAConfigFileManager
+from .llm_client import BaseLLMClient, create_llm_client
 
 _LOGGER = logging.getLogger(__name__)
 
 # Maximum number of tool-use round-trips per conversation turn
 MAX_TOOL_ROUNDS = 5
 
-SYSTEM_PROMPT = """You are a Home Assistant voice automation assistant. You help users \
-manage their smart home by creating, editing, deleting, and listing automations, \
-scripts, and scenes.
+SYSTEM_PROMPT = """You are a Home Assistant smart home assistant. You can control \
+devices and manage automations, scripts, and scenes.
 
-When a user asks you to create, modify, or manage automations, scripts, or scenes, \
-use the provided tools. Always use the tools - never just describe what YAML would \
-look like without actually creating it.
+You can:
+1. Control devices - turn on/off lights, lock doors, set temperatures, etc. \
+Use the call_service tool.
+2. Check device states - use get_entity_state to see current status.
+3. Manage automations - create, edit, delete, and list automations.
+4. Manage scripts - create, edit, delete, and list scripts.
+5. Manage scenes - create, edit, delete, and list scenes.
 
 Guidelines:
-- When creating automations/scripts/scenes, generate valid Home Assistant YAML.
-- For automations: use list format starting with '- alias:'. Include alias, \
-description, mode (default: single), trigger, condition (can be []), and action.
-- For scripts: use dict format with just the script body (alias, description, \
-mode, sequence). The script name/key is provided separately.
-- For scenes: use dict format with name, id, and entities.
-- Always use entity IDs that exist in the user's Home Assistant instance (listed below).
+- Always use the tools to perform actions - never just describe what to do.
+- For device control, use call_service with the correct domain and service.
+- For automations: YAML dict with alias, description, mode, trigger, condition, action.
+- For scripts: YAML dict with alias, description, mode, sequence.
+- For scenes: YAML dict with name, id, entities.
+- Only use entity IDs that exist (listed below).
 - When editing, preserve fields the user didn't ask to change.
-- Before deleting, confirm with the user what will be removed.
-- When listing, provide a concise summary (alias/name and ID).
+- Before deleting, confirm what will be removed.
 - Respond in the user's language.
-- Be concise in your responses - this is a voice interface.
+- Be concise - this is a voice interface.
 
 Available Home Assistant entities:
 {entities}
 """
-
-# Claude tool definitions for managing HA config
-TOOLS = [
-    {
-        "name": "list_automations",
-        "description": "List all automations defined in automations.yaml. Returns a list of automations with their IDs and aliases.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "create_automation",
-        "description": "Create a new Home Assistant automation. The yaml_content should be a valid automation dict (NOT a list) with keys: alias, description, mode, trigger, condition, action.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "yaml_content": {
-                    "type": "string",
-                    "description": "The automation as a YAML string. Must be a single automation dict with alias, description, mode, trigger, condition, and action.",
-                },
-            },
-            "required": ["yaml_content"],
-        },
-    },
-    {
-        "name": "edit_automation",
-        "description": "Edit an existing automation by its ID. Provide the complete updated automation as YAML.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "automation_id": {
-                    "type": "string",
-                    "description": "The ID of the automation to edit.",
-                },
-                "yaml_content": {
-                    "type": "string",
-                    "description": "The complete updated automation as a YAML string.",
-                },
-            },
-            "required": ["automation_id", "yaml_content"],
-        },
-    },
-    {
-        "name": "delete_automation",
-        "description": "Delete an automation by its ID.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "automation_id": {
-                    "type": "string",
-                    "description": "The ID of the automation to delete.",
-                },
-            },
-            "required": ["automation_id"],
-        },
-    },
-    {
-        "name": "list_scripts",
-        "description": "List all scripts defined in scripts.yaml. Returns script names and their aliases.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "create_script",
-        "description": "Create a new Home Assistant script. Provide a name (lowercase, underscores) and the script body as YAML with keys: alias, description, mode, sequence.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "script_name": {
-                    "type": "string",
-                    "description": "The script identifier (lowercase, underscores only, no hyphens).",
-                },
-                "yaml_content": {
-                    "type": "string",
-                    "description": "The script body as a YAML string with alias, description, mode, and sequence.",
-                },
-            },
-            "required": ["script_name", "yaml_content"],
-        },
-    },
-    {
-        "name": "edit_script",
-        "description": "Edit an existing script by name. Provide the complete updated script body as YAML.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "script_name": {
-                    "type": "string",
-                    "description": "The name/key of the script to edit.",
-                },
-                "yaml_content": {
-                    "type": "string",
-                    "description": "The complete updated script body as a YAML string.",
-                },
-            },
-            "required": ["script_name", "yaml_content"],
-        },
-    },
-    {
-        "name": "delete_script",
-        "description": "Delete a script by name.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "script_name": {
-                    "type": "string",
-                    "description": "The name/key of the script to delete.",
-                },
-            },
-            "required": ["script_name"],
-        },
-    },
-    {
-        "name": "list_scenes",
-        "description": "List all scenes defined in scenes.yaml. Returns scene names and IDs.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    {
-        "name": "create_scene",
-        "description": "Create a new Home Assistant scene. The yaml_content should be a scene dict with name and entities.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "yaml_content": {
-                    "type": "string",
-                    "description": "The scene as a YAML string with name and entities.",
-                },
-            },
-            "required": ["yaml_content"],
-        },
-    },
-    {
-        "name": "edit_scene",
-        "description": "Edit an existing scene by its ID. Provide the complete updated scene as YAML.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "scene_id": {
-                    "type": "string",
-                    "description": "The ID of the scene to edit.",
-                },
-                "yaml_content": {
-                    "type": "string",
-                    "description": "The complete updated scene as a YAML string.",
-                },
-            },
-            "required": ["scene_id", "yaml_content"],
-        },
-    },
-    {
-        "name": "delete_scene",
-        "description": "Delete a scene by its ID.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "scene_id": {
-                    "type": "string",
-                    "description": "The ID of the scene to delete.",
-                },
-            },
-            "required": ["scene_id"],
-        },
-    },
-]
 
 
 async def async_setup_entry(
@@ -271,13 +106,30 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         """Get the file manager instance."""
         return self.hass.data[DOMAIN]["file_manager"]
 
+    def _create_llm_client(self) -> BaseLLMClient:
+        """Create an LLM client from the current config."""
+        config = self._config
+        provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
+
+        if provider == PROVIDER_ANTHROPIC:
+            return create_llm_client(
+                provider,
+                api_key=config[CONF_API_KEY],
+                timeout=API_TIMEOUT,
+            )
+        else:
+            return create_llm_client(
+                provider,
+                host=config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+                timeout=OLLAMA_TIMEOUT,
+            )
+
     async def async_process(
         self,
         user_input: ConversationInput,
     ) -> ConversationResult:
         """Process a conversation turn."""
         config = self._config
-        api_key = config[CONF_API_KEY]
         model = config.get(CONF_MODEL, DEFAULT_MODEL)
         language = config.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
 
@@ -286,18 +138,17 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         )
         system_prompt = SYSTEM_PROMPT.format(entities=entities_context)
 
-        # Build messages from the user input
         messages = [{"role": "user", "content": user_input.text}]
 
         try:
-            response_text = await self._call_claude_with_tools(
-                api_key, model, system_prompt, messages
+            client = self._create_llm_client()
+            response_text = await self._call_with_tools(
+                client, model, system_prompt, messages
             )
         except Exception as err:
             _LOGGER.error("Error in conversation: %s", err)
             response_text = f"Sorry, I encountered an error: {err}"
 
-        # Build the response
         intent_response = intent.IntentResponse(language=language)
         intent_response.async_set_speech(response_text)
 
@@ -306,24 +157,22 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
             response=intent_response,
         )
 
-    async def _call_claude_with_tools(
+    async def _call_with_tools(
         self,
-        api_key: str,
+        client: BaseLLMClient,
         model: str,
         system_prompt: str,
         messages: list[dict],
     ) -> str:
-        """Call Claude API with tool-use support, handling tool calls in a loop."""
-        client = anthropic.Anthropic(api_key=api_key)
+        """Call LLM with tool-use support, handling tool calls in a loop."""
 
         def _create_message(msgs: list[dict]) -> Any:
-            """Make a blocking Claude API call."""
-            return client.messages.create(
+            return client.create_message(
                 model=model,
-                max_tokens=MAX_TOKENS,
-                system=system_prompt,
+                system_prompt=system_prompt,
                 messages=msgs,
-                tools=TOOLS,
+                max_tokens=MAX_TOKENS,
+                tools=True,
             )
 
         for _round in range(MAX_TOOL_ROUNDS):
@@ -331,45 +180,18 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 _create_message, messages
             )
 
-            # Check if Claude wants to use a tool
-            if response.stop_reason == "tool_use":
-                # Process all tool calls in this response
+            if response.has_tool_calls:
                 tool_results = []
-                assistant_content = []
+                for tc in response.tool_calls:
+                    result = await self._execute_tool(tc["name"], tc["arguments"])
+                    tool_results.append({
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps(result, default=str),
+                    })
 
-                for block in response.content:
-                    if block.type == "text":
-                        assistant_content.append({
-                            "type": "text",
-                            "text": block.text,
-                        })
-                    elif block.type == "tool_use":
-                        assistant_content.append({
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input,
-                        })
-
-                        # Execute the tool
-                        result = await self._execute_tool(block.name, block.input)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result, default=str),
-                        })
-
-                # Add assistant message and tool results to conversation
-                messages.append({"role": "assistant", "content": assistant_content})
-                messages.append({"role": "user", "content": tool_results})
-
+                client.add_tool_results(messages, response, tool_results)
             else:
-                # Claude returned a final text response
-                text_parts = []
-                for block in response.content:
-                    if block.type == "text":
-                        text_parts.append(block.text)
-                return " ".join(text_parts) if text_parts else "Done."
+                return response.text or "Done."
 
         return "I completed the requested operations."
 
@@ -460,9 +282,41 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 await fm.delete_scene(tool_input["scene_id"])
                 return {"success": True, "scene_id": tool_input["scene_id"]}
 
+            elif tool_name == "call_service":
+                domain = tool_input["domain"]
+                service = tool_input["service"]
+                entity_id = tool_input["entity_id"]
+                service_data = {}
+                if "service_data" in tool_input and tool_input["service_data"]:
+                    service_data = json.loads(tool_input["service_data"])
+                service_data["entity_id"] = entity_id
+
+                await self.hass.services.async_call(
+                    domain, service, service_data, blocking=True
+                )
+                return {
+                    "success": True,
+                    "called": f"{domain}.{service}",
+                    "entity_id": entity_id,
+                }
+
+            elif tool_name == "get_entity_state":
+                entity_id = tool_input["entity_id"]
+                state = self.hass.states.get(entity_id)
+                if state is None:
+                    return {"success": False, "error": f"Entity '{entity_id}' not found"}
+                return {
+                    "success": True,
+                    "entity_id": entity_id,
+                    "state": state.state,
+                    "attributes": dict(state.attributes),
+                }
+
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
 
+        except json.JSONDecodeError as err:
+            return {"success": False, "error": f"Invalid JSON in service_data: {err}"}
         except yaml.YAMLError as err:
             return {"success": False, "error": f"Invalid YAML: {err}"}
         except ValueError as err:

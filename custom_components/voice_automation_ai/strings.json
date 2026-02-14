@@ -3,19 +3,38 @@
     "step": {
       "user": {
         "title": "Voice Automation AI Setup",
-        "description": "Enter your Anthropic API key to connect to Claude AI.",
+        "description": "Choose your LLM provider.",
+        "data": {
+          "provider": "LLM Provider"
+        }
+      },
+      "anthropic": {
+        "title": "Anthropic Claude Configuration",
+        "description": "Enter your Anthropic API key from console.anthropic.com.",
         "data": {
           "api_key": "API Key",
           "model": "Claude Model"
         },
         "data_description": {
-          "api_key": "Your Anthropic API key from console.anthropic.com",
-          "model": "Which Claude model to use for generating automations"
+          "api_key": "Your Anthropic API key (starts with sk-ant-...)",
+          "model": "Which Claude model to use"
+        }
+      },
+      "ollama": {
+        "title": "Ollama Configuration",
+        "description": "Configure your local Ollama instance.",
+        "data": {
+          "ollama_host": "Ollama Host URL",
+          "model": "Model"
+        },
+        "data_description": {
+          "ollama_host": "URL where Ollama is running (e.g. http://192.168.1.100:11434)",
+          "model": "Which model to use (must be pulled in Ollama first)"
         }
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect to the Anthropic API. Check your network connection.",
+      "cannot_connect": "Unable to connect. Check your API key, network, or Ollama host.",
       "invalid_auth": "Invalid API key. Please check your Anthropic API key.",
       "unknown": "An unexpected error occurred."
     },

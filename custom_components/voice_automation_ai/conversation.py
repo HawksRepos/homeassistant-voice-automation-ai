@@ -156,8 +156,15 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         )
         system_prompt = SYSTEM_PROMPT.format(entities=entities_context)
 
-        # Retrieve existing history or start fresh
-        messages = list(self._conversations.get(conversation_id, []))
+        # Retrieve clean history (only user/assistant text pairs).
+        # Tool-use exchanges are kept out of stored history to prevent
+        # the Anthropic API from rejecting orphaned tool_result blocks
+        # after history trimming.
+        history = list(self._conversations.get(conversation_id, []))
+
+        # Build working messages for this turn (history + new user message).
+        # _call_with_tools may mutate this list by adding tool exchanges.
+        messages = list(history)
         messages.append({"role": "user", "content": user_input.text})
 
         try:
@@ -169,15 +176,16 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
             _LOGGER.error("Error in conversation: %s", err)
             response_text = f"Sorry, I encountered an error: {err}"
 
-        # Append assistant reply to history
-        messages.append({"role": "assistant", "content": response_text})
+        # Only store clean user/assistant text in history (no tool exchanges)
+        history.append({"role": "user", "content": user_input.text})
+        history.append({"role": "assistant", "content": response_text})
 
         # Trim history to keep token usage bounded
-        if len(messages) > max_history_turns * 2:
-            messages = messages[-(max_history_turns * 2):]
+        if len(history) > max_history_turns * 2:
+            history = history[-(max_history_turns * 2):]
 
         # Store updated history, evicting oldest conversation if needed
-        self._conversations[conversation_id] = messages
+        self._conversations[conversation_id] = history
         self._conversations.move_to_end(conversation_id)
         while len(self._conversations) > MAX_CONVERSATIONS:
             self._conversations.popitem(last=False)

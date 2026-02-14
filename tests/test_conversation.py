@@ -494,3 +494,124 @@ class TestCallWithTools:
             mock_client, "model", "system", [{"role": "user", "content": "hi"}], 100
         )
         assert result == "Done."
+
+
+# ── Regression: tool exchanges must not pollute stored history ──
+
+
+class TestHistoryExcludesToolExchanges:
+    """Regression test for Anthropic API error 400.
+
+    When tool_use/tool_result messages leak into stored conversation
+    history, trimming can orphan tool_result blocks and cause:
+        'unexpected tool_use_id found in tool_result blocks'
+    """
+
+    async def test_stored_history_contains_only_user_assistant_text(self, agent, file_manager_mock):
+        """After a tool-using turn, stored history must only contain
+        simple user/assistant text pairs - no tool exchanges."""
+        from custom_components.voice_automation_ai.llm_client import LLMResponse
+
+        file_manager_mock.read_automations = AsyncMock(return_value=[
+            {"id": "1", "alias": "Morning Lights"},
+        ])
+        file_manager_mock.get_entities_context = MagicMock(return_value="light.test: on")
+
+        # First response uses a tool, second response is the final text
+        responses = [
+            LLMResponse(
+                tool_calls=[{"id": "tc1", "name": "list_automations", "arguments": {}}],
+                raw_assistant_message=[
+                    {"type": "tool_use", "id": "tc1", "name": "list_automations", "input": {}}
+                ],
+            ),
+            LLMResponse(text="You have 1 automation: Morning Lights."),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.create_message.side_effect = responses
+        mock_client.add_tool_results = MagicMock()
+
+        with patch.object(agent, "_create_llm_client", return_value=mock_client):
+            user_input = MagicMock()
+            user_input.text = "list my automations"
+            user_input.conversation_id = "test-conv-123"
+
+            await agent.async_process(user_input)
+
+        history = agent._conversations["test-conv-123"]
+
+        # Should contain exactly 2 messages: user text + assistant text
+        assert len(history) == 2
+        assert history[0] == {"role": "user", "content": "list my automations"}
+        assert history[1] == {"role": "assistant", "content": "You have 1 automation: Morning Lights."}
+
+        # No tool_use, tool_result, or tool messages should be present
+        for msg in history:
+            assert msg["role"] in ("user", "assistant"), f"Unexpected role: {msg['role']}"
+            assert isinstance(msg["content"], str), f"Content should be text, not: {type(msg['content'])}"
+
+    async def test_multi_turn_with_tools_keeps_clean_history(self, agent, file_manager_mock):
+        """Multiple conversation turns with tool usage should all store clean history."""
+        from custom_components.voice_automation_ai.llm_client import LLMResponse
+
+        file_manager_mock.read_automations = AsyncMock(return_value=[])
+        file_manager_mock.read_scenes = AsyncMock(return_value=[
+            {"id": "1", "name": "Movie Night"},
+        ])
+        file_manager_mock.get_entities_context = MagicMock(return_value="light.test: on")
+
+        conv_id = "multi-turn-test"
+
+        # Turn 1: tool call + text
+        responses_turn1 = [
+            LLMResponse(
+                tool_calls=[{"id": "tc1", "name": "list_automations", "arguments": {}}],
+                raw_assistant_message=[
+                    {"type": "tool_use", "id": "tc1", "name": "list_automations", "input": {}}
+                ],
+            ),
+            LLMResponse(text="No automations found."),
+        ]
+
+        mock_client1 = MagicMock()
+        mock_client1.create_message.side_effect = responses_turn1
+        mock_client1.add_tool_results = MagicMock()
+
+        with patch.object(agent, "_create_llm_client", return_value=mock_client1):
+            user_input = MagicMock()
+            user_input.text = "list automations"
+            user_input.conversation_id = conv_id
+            await agent.async_process(user_input)
+
+        # Turn 2: another tool call + text
+        responses_turn2 = [
+            LLMResponse(
+                tool_calls=[{"id": "tc2", "name": "list_scenes", "arguments": {}}],
+                raw_assistant_message=[
+                    {"type": "tool_use", "id": "tc2", "name": "list_scenes", "input": {}}
+                ],
+            ),
+            LLMResponse(text="You have 1 scene: Movie Night."),
+        ]
+
+        mock_client2 = MagicMock()
+        mock_client2.create_message.side_effect = responses_turn2
+        mock_client2.add_tool_results = MagicMock()
+
+        with patch.object(agent, "_create_llm_client", return_value=mock_client2):
+            user_input = MagicMock()
+            user_input.text = "list scenes"
+            user_input.conversation_id = conv_id
+            await agent.async_process(user_input)
+
+        history = agent._conversations[conv_id]
+
+        # 2 turns * 2 messages each = 4 messages
+        assert len(history) == 4
+        assert all(msg["role"] in ("user", "assistant") for msg in history)
+        assert all(isinstance(msg["content"], str) for msg in history)
+        assert history[0]["content"] == "list automations"
+        assert history[1]["content"] == "No automations found."
+        assert history[2]["content"] == "list scenes"
+        assert history[3]["content"] == "You have 1 scene: Movie Night."

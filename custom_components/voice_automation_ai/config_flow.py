@@ -45,7 +45,7 @@ async def validate_api_key(hass: HomeAssistant, api_key: str) -> dict[str, str]:
     except anthropic.AuthenticationError:
         raise InvalidAuth
     except Exception as err:
-        _LOGGER.error(f"Error validating API key: {err}")
+        _LOGGER.error("Error validating API key: %s", err)
         raise CannotConnect
 
 

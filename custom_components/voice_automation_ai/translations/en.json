@@ -1,0 +1,26 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Voice Automation AI Setup",
+        "description": "Enter your Anthropic API key to connect to Claude AI.",
+        "data": {
+          "api_key": "API Key",
+          "model": "Claude Model"
+        },
+        "data_description": {
+          "api_key": "Your Anthropic API key from console.anthropic.com",
+          "model": "Which Claude model to use for generating automations"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the Anthropic API. Check your network connection.",
+      "invalid_auth": "Invalid API key. Please check your Anthropic API key.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This integration is already configured."
+    }
+  }
+}

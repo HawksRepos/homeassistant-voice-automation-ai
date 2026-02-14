@@ -1,0 +1,11 @@
+{
+  "domain": "voice_automation_ai",
+  "name": "Voice Automation AI",
+  "codeowners": ["@HawksRepos"],
+  "config_flow": true,
+  "documentation": "https://github.com/HawksRepos/homeassistant-voice-automation-ai",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": ["anthropic"],
+  "version": "0.2.0"
+}

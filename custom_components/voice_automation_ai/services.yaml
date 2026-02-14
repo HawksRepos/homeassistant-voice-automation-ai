@@ -1,0 +1,163 @@
+create_automation:
+  name: Create Automation
+  description: Generate a Home Assistant automation from a natural language description using Claude AI.
+  fields:
+    description:
+      name: Description
+      description: Natural language description of the automation you want to create.
+      required: true
+      example: "Turn on the living room lights when motion is detected after sunset"
+      selector:
+        text:
+    preview:
+      name: Preview Only
+      description: Return the generated YAML without creating the automation.
+      default: false
+      selector:
+        boolean:
+    validate_only:
+      name: Validate Only
+      description: Validate the generated YAML without creating the automation.
+      default: false
+      selector:
+        boolean:
+
+validate_automation:
+  name: Validate Automation YAML
+  description: Validate a YAML string to check if it is a valid Home Assistant automation.
+  fields:
+    yaml_content:
+      name: YAML Content
+      description: The YAML content to validate.
+      required: true
+      example: "- alias: My Automation\n  trigger: []\n  action: []"
+      selector:
+        text:
+          multiline: true
+
+create_script:
+  name: Create Script
+  description: Generate a Home Assistant script from a natural language description using Claude AI.
+  fields:
+    description:
+      name: Description
+      description: Natural language description of the script you want to create.
+      required: true
+      example: "A script that flashes the lights 3 times and sends a notification"
+      selector:
+        text:
+    script_name:
+      name: Script Name
+      description: Identifier for the script (lowercase, underscores only). Auto-generated if not provided.
+      required: false
+      example: "flash_lights_notify"
+      selector:
+        text:
+
+create_scene:
+  name: Create Scene
+  description: Generate a Home Assistant scene from a natural language description using Claude AI.
+  fields:
+    description:
+      name: Description
+      description: Natural language description of the scene you want to create.
+      required: true
+      example: "A movie night scene with dim lights and the TV on"
+      selector:
+        text:
+
+edit_automation:
+  name: Edit Automation
+  description: Modify an existing automation by ID using a natural language description of the changes.
+  fields:
+    automation_id:
+      name: Automation ID
+      description: The ID of the automation to edit.
+      required: true
+      selector:
+        text:
+    description:
+      name: Changes
+      description: Natural language description of the changes to make.
+      required: true
+      selector:
+        text:
+
+edit_script:
+  name: Edit Script
+  description: Modify an existing script by name using a natural language description of the changes.
+  fields:
+    script_name:
+      name: Script Name
+      description: The name/key of the script to edit.
+      required: true
+      selector:
+        text:
+    description:
+      name: Changes
+      description: Natural language description of the changes to make.
+      required: true
+      selector:
+        text:
+
+edit_scene:
+  name: Edit Scene
+  description: Modify an existing scene by ID using a natural language description of the changes.
+  fields:
+    scene_id:
+      name: Scene ID
+      description: The ID of the scene to edit.
+      required: true
+      selector:
+        text:
+    description:
+      name: Changes
+      description: Natural language description of the changes to make.
+      required: true
+      selector:
+        text:
+
+delete_automation:
+  name: Delete Automation
+  description: Remove an existing automation by ID.
+  fields:
+    automation_id:
+      name: Automation ID
+      description: The ID of the automation to delete.
+      required: true
+      selector:
+        text:
+
+delete_script:
+  name: Delete Script
+  description: Remove an existing script by name.
+  fields:
+    script_name:
+      name: Script Name
+      description: The name/key of the script to delete.
+      required: true
+      selector:
+        text:
+
+delete_scene:
+  name: Delete Scene
+  description: Remove an existing scene by ID.
+  fields:
+    scene_id:
+      name: Scene ID
+      description: The ID of the scene to delete.
+      required: true
+      selector:
+        text:
+
+list_automations:
+  name: List Automations
+  description: List all automations currently defined in automations.yaml.
+
+list_scripts:
+  name: List Scripts
+  description: List all scripts currently defined in scripts.yaml.
+
+list_scenes:
+  name: List Scenes
+  description: List all scenes currently defined in scenes.yaml.

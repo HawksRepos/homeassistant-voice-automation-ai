@@ -563,7 +563,7 @@ class TestOllamaAsyncValidateConnection:
 
         with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
             client = OllamaClient()
-            with pytest.raises(ConnectionError, match="not found"):
+            with pytest.raises(ValueError, match="not found"):
                 await client.async_validate_connection("llama3.1")
 
     async def test_connection_refused(self):

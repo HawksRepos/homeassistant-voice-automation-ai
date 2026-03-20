@@ -54,6 +54,7 @@ from .const import (
     DOMAIN,
     OLLAMA_TIMEOUT,
     PROVIDER_ANTHROPIC,
+    PROVIDER_OLLAMA,
     SENSITIVE_ATTRIBUTE_KEYS,
 )
 from .file_manager import HAConfigFileManager
@@ -196,17 +197,36 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 client, model, system_prompt, messages, max_tokens
             )
         except ConnectionError as err:
-            _LOGGER.error("LLM connection error: %s", err)
-            response_text = (
-                "Sorry, I could not reach the language model. "
-                "Please check that the service is running and accessible."
-            )
+            provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
+            if provider == PROVIDER_OLLAMA:
+                host = config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
+                _LOGGER.error("Ollama connection error (host: %s): %s", host, err)
+                response_text = (
+                    f"Sorry, I could not reach Ollama at {host}. "
+                    "Please check that Ollama is running and accessible "
+                    "from Home Assistant."
+                )
+            else:
+                _LOGGER.error("Anthropic API connection error: %s", err)
+                response_text = (
+                    "Sorry, I could not reach the Anthropic API. "
+                    "Please check your API key and internet connection."
+                )
         except TimeoutError as err:
-            _LOGGER.error("LLM request timed out: %s", err)
-            response_text = (
-                "Sorry, the language model took too long to respond. "
-                "Try a shorter request or check if the model is overloaded."
-            )
+            provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
+            if provider == PROVIDER_OLLAMA:
+                host = config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
+                _LOGGER.error("Ollama request timed out (host: %s): %s", host, err)
+                response_text = (
+                    f"Sorry, Ollama at {host} took too long to respond. "
+                    "Try a shorter request or check if the model is overloaded."
+                )
+            else:
+                _LOGGER.error("Anthropic API request timed out: %s", err)
+                response_text = (
+                    "Sorry, the Anthropic API took too long to respond. "
+                    "Try a shorter request."
+                )
         except Exception as err:
             _LOGGER.error("Error in conversation: %s", err, exc_info=True)
             response_text = (

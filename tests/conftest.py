@@ -85,6 +85,7 @@ def _install_fake_ha_modules() -> dict:
 
     class FakeOptionsFlow:
         """Base options flow mock."""
+        hass = None
 
         def async_show_form(self, **kwargs):
             return kwargs

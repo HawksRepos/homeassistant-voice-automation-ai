@@ -44,7 +44,11 @@ _LOGGER = logging.getLogger(__name__)
 async def validate_connection(
     hass: HomeAssistant, provider: str, **kwargs: Any
 ) -> dict[str, str]:
-    """Validate the LLM connection."""
+    """Validate the LLM connection.
+
+    Raises CannotConnect for connection failures.
+    Raises ModelNotFound if the host is reachable but the model is missing.
+    """
     try:
         client = create_llm_client(provider, **kwargs)
         model = kwargs.get("model", DEFAULT_MODEL)
@@ -53,9 +57,12 @@ async def validate_connection(
         else:
             await hass.async_add_executor_job(client.validate_connection, model)
         return {"title": "Voice Automation AI"}
+    except ValueError as err:
+        _LOGGER.warning("Model validation failed: %s", err)
+        raise ModelNotFound(str(err)) from err
     except Exception as err:
         _LOGGER.error("Connection validation failed: %s", err)
-        raise CannotConnect(str(err))
+        raise CannotConnect(str(err)) from err
 
 
 class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -220,6 +227,8 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
+            except ModelNotFound:
+                errors["base"] = "model_not_found"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except Exception as err:
@@ -256,17 +265,47 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage runtime options."""
+        errors: dict[str, str] = {}
+        provider = self._config_entry.data.get(CONF_PROVIDER, DEFAULT_PROVIDER)
+
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # Validate connection before saving
+            try:
+                if provider == PROVIDER_OLLAMA:
+                    host = user_input.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
+                    model = user_input.get(CONF_MODEL, DEFAULT_OLLAMA_MODEL)
+                    await validate_connection(
+                        self.hass, PROVIDER_OLLAMA, host=host, model=model,
+                    )
+                else:
+                    model = user_input.get(CONF_MODEL, DEFAULT_MODEL)
+                    api_key = self._config_entry.data.get(CONF_API_KEY, "")
+                    await validate_connection(
+                        self.hass, PROVIDER_ANTHROPIC,
+                        api_key=api_key, model=model,
+                    )
+            except ModelNotFound:
+                errors["base"] = "model_not_found"
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception as err:
+                _LOGGER.error("Unexpected error validating options: %s", type(err).__name__)
+                errors["base"] = "unknown"
+
+            if not errors:
+                return self.async_create_entry(title="", data=user_input)
 
         # Determine which model list to show based on provider
-        provider = self._config_entry.data.get(CONF_PROVIDER, DEFAULT_PROVIDER)
         if provider == PROVIDER_ANTHROPIC:
             model_options = dict(ANTHROPIC_MODELS)
             default_model = DEFAULT_MODEL
         else:
+            # Host can be overridden in options, fall back to data, then default
+            host = self._config_entry.options.get(
+                CONF_OLLAMA_HOST,
+                self._config_entry.data.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+            )
             # Try dynamic model discovery for Ollama
-            host = self._config_entry.data.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
             try:
                 client = OllamaClient(host=host)
                 model_options = await client.async_fetch_models()
@@ -306,10 +345,15 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
             ),
         }
 
-        # Add generation parameters for Ollama only
+        # Add Ollama-specific options
         if provider == PROVIDER_OLLAMA:
+            current_host = self._config_entry.options.get(
+                CONF_OLLAMA_HOST,
+                self._config_entry.data.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+            )
             current_temperature = self._config_entry.options.get(CONF_TEMPERATURE)
             current_top_p = self._config_entry.options.get(CONF_TOP_P)
+            data_schema_fields[vol.Required(CONF_OLLAMA_HOST, default=current_host)] = str
             data_schema_fields[vol.Optional(CONF_TEMPERATURE, default=current_temperature)] = vol.Any(
                 None, vol.All(vol.Coerce(float), vol.Range(min=0.0, max=2.0))
             )
@@ -319,8 +363,12 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
 
         data_schema = vol.Schema(data_schema_fields)
 
-        return self.async_show_form(step_id="init", data_schema=data_schema)
+        return self.async_show_form(step_id="init", data_schema=data_schema, errors=errors)
 
 
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
+
+
+class ModelNotFound(HomeAssistantError):
+    """Error to indicate the model was not found on the server."""

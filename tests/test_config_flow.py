@@ -26,6 +26,7 @@ from custom_components.voice_automation_ai.const import (
 )
 from custom_components.voice_automation_ai.config_flow import (
     CannotConnect,
+    ModelNotFound,
     VoiceAutomationAIConfigFlow,
     VoiceAutomationAIOptionsFlow,
     validate_connection,
@@ -78,6 +79,22 @@ class TestValidateConnection:
             with pytest.raises(CannotConnect):
                 await validate_connection(
                     hass, PROVIDER_ANTHROPIC, api_key="sk-bad", model=DEFAULT_MODEL
+                )
+
+    async def test_model_not_found_raises(self, hass):
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.create_llm_client"
+        ) as mock_factory:
+            mock_client = MagicMock()
+            mock_client.is_async = True
+            mock_client.async_validate_connection = AsyncMock(
+                side_effect=ValueError("Model 'bad-model' not found")
+            )
+            mock_factory.return_value = mock_client
+
+            with pytest.raises(ModelNotFound):
+                await validate_connection(
+                    hass, PROVIDER_OLLAMA, host="http://localhost:11434", model="bad-model"
                 )
 
 
@@ -284,7 +301,7 @@ class TestConfigFlowOllamaStep:
 class TestOptionsFlow:
     """Test the options flow."""
 
-    async def test_shows_form_when_no_input(self):
+    async def test_shows_form_when_no_input(self, hass):
         entry = MagicMock()
         entry.data = {CONF_PROVIDER: PROVIDER_ANTHROPIC}
         entry.options = {
@@ -295,15 +312,17 @@ class TestOptionsFlow:
         }
 
         flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
         result = await flow.async_step_init(user_input=None)
         assert result["step_id"] == "init"
 
-    async def test_saves_input(self):
+    async def test_saves_input_after_successful_validation(self, hass):
         entry = MagicMock()
-        entry.data = {CONF_PROVIDER: PROVIDER_ANTHROPIC}
+        entry.data = {CONF_PROVIDER: PROVIDER_ANTHROPIC, CONF_API_KEY: "sk-ant-test"}
         entry.options = {}
 
         flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
 
         user_input = {
             CONF_MODEL: "claude-opus-4-1-20250805",
@@ -312,12 +331,16 @@ class TestOptionsFlow:
             CONF_MAX_HISTORY_TURNS: 20,
         }
 
-        result = await flow.async_step_init(user_input=user_input)
-        assert result["type"] == "create_entry"
-        assert result["data"] == user_input
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.validate_connection",
+            return_value={"title": "Voice Automation AI"},
+        ):
+            result = await flow.async_step_init(user_input=user_input)
+            assert result["type"] == "create_entry"
+            assert result["data"] == user_input
 
-    async def test_ollama_provider_accepted(self):
-        """Options flow for Ollama provider should work."""
+    async def test_ollama_provider_shows_form(self, hass):
+        """Options flow for Ollama provider should show form."""
         entry = MagicMock()
         entry.data = {CONF_PROVIDER: PROVIDER_OLLAMA}
         entry.options = {
@@ -328,5 +351,114 @@ class TestOptionsFlow:
         }
 
         flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
         result = await flow.async_step_init(user_input=None)
         assert result["step_id"] == "init"
+
+    async def test_ollama_saves_after_successful_validation(self, hass):
+        """Options flow for Ollama should validate and save."""
+        entry = MagicMock()
+        entry.data = {
+            CONF_PROVIDER: PROVIDER_OLLAMA,
+            CONF_OLLAMA_HOST: "http://localhost:11434",
+        }
+        entry.options = {}
+
+        flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
+
+        user_input = {
+            CONF_OLLAMA_HOST: "http://192.168.1.100:11434",
+            CONF_MODEL: "llama3.1",
+            CONF_LANGUAGE: "en",
+            CONF_MAX_TOKENS: 4096,
+            CONF_MAX_HISTORY_TURNS: 10,
+        }
+
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.validate_connection",
+            return_value={"title": "Voice Automation AI"},
+        ):
+            result = await flow.async_step_init(user_input=user_input)
+            assert result["type"] == "create_entry"
+            assert result["data"][CONF_OLLAMA_HOST] == "http://192.168.1.100:11434"
+
+    async def test_ollama_cannot_connect_shows_error(self, hass):
+        """Options flow should show error when Ollama is unreachable."""
+        entry = MagicMock()
+        entry.data = {
+            CONF_PROVIDER: PROVIDER_OLLAMA,
+            CONF_OLLAMA_HOST: "http://localhost:11434",
+        }
+        entry.options = {}
+
+        flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
+
+        user_input = {
+            CONF_OLLAMA_HOST: "http://bad-host:11434",
+            CONF_MODEL: "llama3.1",
+            CONF_LANGUAGE: "en",
+            CONF_MAX_TOKENS: 4096,
+            CONF_MAX_HISTORY_TURNS: 10,
+        }
+
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.validate_connection",
+            side_effect=CannotConnect("Connection refused"),
+        ):
+            result = await flow.async_step_init(user_input=user_input)
+            assert result["errors"]["base"] == "cannot_connect"
+            # Should re-show the form, not save
+            assert result.get("type") != "create_entry"
+
+    async def test_ollama_model_not_found_shows_error(self, hass):
+        """Options flow should show error when model is not found."""
+        entry = MagicMock()
+        entry.data = {
+            CONF_PROVIDER: PROVIDER_OLLAMA,
+            CONF_OLLAMA_HOST: "http://localhost:11434",
+        }
+        entry.options = {}
+
+        flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
+
+        user_input = {
+            CONF_OLLAMA_HOST: "http://localhost:11434",
+            CONF_MODEL: "nonexistent-model",
+            CONF_LANGUAGE: "en",
+            CONF_MAX_TOKENS: 4096,
+            CONF_MAX_HISTORY_TURNS: 10,
+        }
+
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.validate_connection",
+            side_effect=ModelNotFound("Model not found"),
+        ):
+            result = await flow.async_step_init(user_input=user_input)
+            assert result["errors"]["base"] == "model_not_found"
+            assert result.get("type") != "create_entry"
+
+    async def test_anthropic_cannot_connect_shows_error(self, hass):
+        """Options flow should show error when Anthropic API fails."""
+        entry = MagicMock()
+        entry.data = {CONF_PROVIDER: PROVIDER_ANTHROPIC, CONF_API_KEY: "sk-ant-bad"}
+        entry.options = {}
+
+        flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
+
+        user_input = {
+            CONF_MODEL: DEFAULT_MODEL,
+            CONF_LANGUAGE: "en",
+            CONF_MAX_TOKENS: 4096,
+            CONF_MAX_HISTORY_TURNS: 10,
+        }
+
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.validate_connection",
+            side_effect=CannotConnect("Auth failed"),
+        ):
+            result = await flow.async_step_init(user_input=user_input)
+            assert result["errors"]["base"] == "cannot_connect"

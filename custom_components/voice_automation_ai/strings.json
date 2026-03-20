@@ -42,7 +42,8 @@
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect. Check your API key, network, or Ollama host.",
+      "cannot_connect": "Unable to connect. Check your API key, network, or Ollama host URL and port.",
+      "model_not_found": "Connected successfully, but the selected model was not found. Make sure it is pulled.",
       "invalid_auth": "Invalid API key. Please check your Anthropic API key.",
       "unknown": "An unexpected error occurred."
     },
@@ -54,8 +55,9 @@
     "step": {
       "init": {
         "title": "Voice Automation AI Options",
-        "description": "Adjust runtime settings. Connection details can only be changed by re-adding the integration.",
+        "description": "Adjust runtime settings.",
         "data": {
+          "ollama_host": "Ollama Host URL",
           "model": "Model",
           "language": "Language",
           "max_tokens": "Max Response Tokens",
@@ -64,6 +66,7 @@
           "top_p": "Top P"
         },
         "data_description": {
+          "ollama_host": "URL where Ollama is running (e.g. http://192.168.1.100:11434)",
           "model": "Which LLM model to use for responses",
           "language": "Language for AI responses",
           "max_tokens": "Maximum tokens per LLM response (256-32768)",
@@ -72,6 +75,11 @@
           "top_p": "Nucleus sampling (0.0-1.0). Controls diversity of responses. Leave empty for model default."
         }
       }
+    },
+    "error": {
+      "cannot_connect": "Connection test failed. Check the host URL/port and that the service is running.",
+      "model_not_found": "Connected successfully, but the selected model was not found. Make sure it is pulled.",
+      "unknown": "An unexpected error occurred while testing the connection."
     }
   }
 }

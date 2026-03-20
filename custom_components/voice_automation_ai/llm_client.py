@@ -524,20 +524,13 @@ class OllamaClient(BaseLLMClient):
             })
 
     async def async_validate_connection(self, model: str) -> None:
-        """Validate Ollama is reachable and model is available."""
+        """Validate Ollama is reachable and model is available.
+
+        Raises ConnectionError if the host is unreachable.
+        Raises ValueError if the model is not found.
+        """
         try:
             data = await self._get("/api/tags")
-            models = [m["name"] for m in data.get("models", [])]
-
-            model_base = model.split(":")[0]
-            available = [m.split(":")[0] for m in models]
-
-            if model_base not in available:
-                raise ConnectionError(
-                    f"Model '{model}' not found in Ollama. "
-                    f"Available: {', '.join(models)}. "
-                    f"Pull it with: ollama pull {model}"
-                )
         except aiohttp.ClientConnectorError:
             raise ConnectionError(
                 f"Cannot connect to Ollama at {self._host}. "
@@ -545,6 +538,17 @@ class OllamaClient(BaseLLMClient):
             )
         except aiohttp.ClientError as err:
             raise ConnectionError(f"Ollama connection error: {err}") from err
+
+        models = [m["name"] for m in data.get("models", [])]
+        model_base = model.split(":")[0]
+        available = [m.split(":")[0] for m in models]
+
+        if model_base not in available:
+            raise ValueError(
+                f"Model '{model}' not found in Ollama. "
+                f"Available: {', '.join(models)}. "
+                f"Pull it with: ollama pull {model}"
+            )
 
     async def async_fetch_models(self) -> dict[str, str]:
         """Fetch installed models from Ollama. Returns {model_name: display_label}."""
@@ -565,7 +569,24 @@ class OllamaClient(BaseLLMClient):
         except Exception:
             return {}
 
-    # ── Private HTTP helpers ──
+    # ── Private helpers ──
+
+    def _describe_error(self, err: Exception | None) -> str:
+        """Build a human-readable error message from an aiohttp exception."""
+        if isinstance(err, aiohttp.ClientConnectorError):
+            return (
+                f"Cannot connect to Ollama at {self._host}. "
+                "Make sure Ollama is running and the host URL is correct."
+            )
+        if isinstance(err, aiohttp.ClientResponseError):
+            if err.status == 404:
+                return (
+                    f"Ollama at {self._host} returned 404 (not found). "
+                    "The model may not be pulled or the API path is wrong."
+                )
+            return f"Ollama at {self._host} returned HTTP {err.status}: {err.message}"
+        return f"Ollama request to {self._host} failed: {err}"
+
 
     async def _post(self, path: str, payload: dict, retries: int = 2) -> dict:
         """POST to Ollama with retry on timeout."""
@@ -585,10 +606,18 @@ class OllamaClient(BaseLLMClient):
                         attempt + 1, retries + 1,
                     )
                     continue
+            except aiohttp.ClientConnectorError as err:
+                last_error = err
+                break
+            except aiohttp.ClientResponseError as err:
+                last_error = err
+                break
             except aiohttp.ClientError as err:
                 last_error = err
                 break
-        raise ConnectionError(f"Ollama request failed: {last_error}") from last_error
+        raise ConnectionError(
+            self._describe_error(last_error)
+        ) from last_error
 
     async def _post_stream(self, path: str, payload: dict, retries: int = 1) -> dict:
         """POST to Ollama with streaming, accumulating the full response.
@@ -642,11 +671,19 @@ class OllamaClient(BaseLLMClient):
                         attempt + 1, retries + 1,
                     )
                     continue
+            except aiohttp.ClientConnectorError as err:
+                last_error = err
+                break
+            except aiohttp.ClientResponseError as err:
+                last_error = err
+                break
             except aiohttp.ClientError as err:
                 last_error = err
                 break
 
-        raise ConnectionError(f"Ollama streaming request failed: {last_error}") from last_error
+        raise ConnectionError(
+            self._describe_error(last_error)
+        ) from last_error
 
     async def _get(self, path: str) -> dict:
         """GET from Ollama."""

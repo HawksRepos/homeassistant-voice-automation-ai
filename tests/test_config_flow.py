@@ -43,6 +43,7 @@ class TestValidateConnection:
             "custom_components.voice_automation_ai.config_flow.create_llm_client"
         ) as mock_factory:
             mock_client = MagicMock()
+            mock_client.is_async = False
             mock_client.validate_connection = MagicMock()
             mock_factory.return_value = mock_client
 
@@ -51,11 +52,26 @@ class TestValidateConnection:
             )
             assert result["title"] == "Voice Automation AI"
 
+    async def test_successful_async_validation(self, hass):
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.create_llm_client"
+        ) as mock_factory:
+            mock_client = MagicMock()
+            mock_client.is_async = True
+            mock_client.async_validate_connection = AsyncMock()
+            mock_factory.return_value = mock_client
+
+            result = await validate_connection(
+                hass, PROVIDER_OLLAMA, host="http://localhost:11434", model="llama3.1"
+            )
+            assert result["title"] == "Voice Automation AI"
+
     async def test_failed_validation_raises(self, hass):
         with patch(
             "custom_components.voice_automation_ai.config_flow.create_llm_client"
         ) as mock_factory:
             mock_client = MagicMock()
+            mock_client.is_async = False
             mock_client.validate_connection.side_effect = ConnectionError("refused")
             mock_factory.return_value = mock_client
 
@@ -178,34 +194,88 @@ class TestConfigFlowAnthropicStep:
 
 
 class TestConfigFlowOllamaStep:
-    """Test the Ollama configuration step."""
+    """Test the two-step Ollama configuration flow."""
 
-    async def test_creates_entry(self, hass):
+    async def test_shows_host_form_when_no_input(self, hass):
         flow = VoiceAutomationAIConfigFlow()
         flow.hass = hass
+
+        result = await flow.async_step_ollama(user_input=None)
+        assert result["step_id"] == "ollama"
+
+    async def test_host_step_discovers_models(self, hass):
+        """Host step should discover models and proceed to model selection."""
+        flow = VoiceAutomationAIConfigFlow()
+        flow.hass = hass
+
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.OllamaClient"
+        ) as mock_cls:
+            mock_client = MagicMock()
+            mock_client.async_fetch_models = AsyncMock(
+                return_value={"llama3.1:latest": "Llama 3.1 (8B)", "mistral:latest": "Mistral (7B)"}
+            )
+            mock_cls.return_value = mock_client
+
+            result = await flow.async_step_ollama(
+                {CONF_OLLAMA_HOST: "http://192.168.1.100:11434"}
+            )
+            # Should proceed to model selection step
+            assert result["step_id"] == "ollama_model"
+
+    async def test_host_step_error_on_no_models(self, hass):
+        """If no models are discovered, show error."""
+        flow = VoiceAutomationAIConfigFlow()
+        flow.hass = hass
+
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.OllamaClient"
+        ) as mock_cls:
+            mock_client = MagicMock()
+            mock_client.async_fetch_models = AsyncMock(return_value={})
+            mock_cls.return_value = mock_client
+
+            result = await flow.async_step_ollama(
+                {CONF_OLLAMA_HOST: "http://bad-host:11434"}
+            )
+            assert result["errors"]["base"] == "cannot_connect"
+
+    async def test_model_step_creates_entry(self, hass):
+        """Model selection step should create the config entry."""
+        flow = VoiceAutomationAIConfigFlow()
+        flow.hass = hass
+        flow._ollama_host = "http://192.168.1.100:11434"
+        flow._discovered_models = {"llama3.1:latest": "Llama 3.1 (8B)"}
 
         with patch(
             "custom_components.voice_automation_ai.config_flow.validate_connection",
             return_value={"title": "Voice Automation AI"},
         ):
-            result = await flow.async_step_ollama(
-                {CONF_OLLAMA_HOST: "http://192.168.1.100:11434", CONF_MODEL: "llama3.1"}
+            result = await flow.async_step_ollama_model(
+                {CONF_MODEL: "llama3.1:latest"}
             )
 
+            assert result["type"] == "create_entry"
             assert result["data"][CONF_PROVIDER] == PROVIDER_OLLAMA
             assert result["data"][CONF_OLLAMA_HOST] == "http://192.168.1.100:11434"
+            assert result["data"][CONF_MODEL] == "llama3.1:latest"
 
-    async def test_default_host(self, hass):
+    async def test_default_host_used(self, hass):
+        """When no host is provided, default should be used."""
         flow = VoiceAutomationAIConfigFlow()
         flow.hass = hass
 
         with patch(
-            "custom_components.voice_automation_ai.config_flow.validate_connection",
-            return_value={"title": "Voice Automation AI"},
-        ):
-            result = await flow.async_step_ollama({CONF_MODEL: "llama3.1"})
+            "custom_components.voice_automation_ai.config_flow.OllamaClient"
+        ) as mock_cls:
+            mock_client = MagicMock()
+            mock_client.async_fetch_models = AsyncMock(
+                return_value={"llama3.1:latest": "Llama 3.1"}
+            )
+            mock_cls.return_value = mock_client
 
-            assert result["data"][CONF_OLLAMA_HOST] == DEFAULT_OLLAMA_HOST
+            result = await flow.async_step_ollama({})
+            assert flow._ollama_host == DEFAULT_OLLAMA_HOST
 
 
 # ── Options flow ──

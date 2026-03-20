@@ -154,6 +154,67 @@ class TestCheckYAMLForBlockedServices:
         }
         assert _check_yaml_for_blocked_services(data) is None
 
+    def test_blocks_nested_choose(self):
+        """Blocked services inside choose/then/else should be detected."""
+        from custom_components.voice_automation_ai import _check_yaml_for_blocked_services
+
+        data = {
+            "action": [{
+                "choose": [{
+                    "conditions": [],
+                    "sequence": [{"service": "shell_command.run"}],
+                }],
+            }],
+        }
+        assert _check_yaml_for_blocked_services(data) is not None
+
+    def test_blocks_nested_parallel(self):
+        """Blocked services inside parallel actions should be detected."""
+        from custom_components.voice_automation_ai import _check_yaml_for_blocked_services
+
+        data = {
+            "action": [{
+                "parallel": [
+                    {"service": "light.turn_on"},
+                    {"service": "python_script.evil"},
+                ],
+            }],
+        }
+        assert _check_yaml_for_blocked_services(data) is not None
+
+    def test_blocks_in_then_else(self):
+        """Blocked services inside if/then/else should be detected."""
+        from custom_components.voice_automation_ai import _check_yaml_for_blocked_services
+
+        data = {
+            "action": [{
+                "if": [],
+                "then": [{"service": "light.turn_on"}],
+                "else": [{"service": "rest_command.evil"}],
+            }],
+        }
+        assert _check_yaml_for_blocked_services(data) is not None
+
+    def test_no_false_positive_on_description(self):
+        """Domain names in string values (not service keys) should NOT trigger."""
+        from custom_components.voice_automation_ai import _check_yaml_for_blocked_services
+
+        data = {
+            "alias": "Replaces shell_command.run with safe service",
+            "description": "This automation replaces shell_command usage",
+            "action": [{"service": "light.turn_on"}],
+        }
+        assert _check_yaml_for_blocked_services(data) is None
+
+    def test_blocks_action_key(self):
+        """The 'action' key (HA 2024.x+) should also be checked as a service ref."""
+        from custom_components.voice_automation_ai import _check_yaml_for_blocked_services
+
+        data = {
+            "action": [{"action": "shell_command.run"}],
+        }
+        assert _check_yaml_for_blocked_services(data) is not None
+
 
 # ── _generate_yaml ──
 
@@ -236,3 +297,19 @@ class TestBuildLLMClientKwargs:
         config = {"provider": "ollama"}
         kwargs = _build_llm_client_kwargs(config)
         assert kwargs["host"] == "http://localhost:11434"
+
+    def test_ollama_with_gen_params(self):
+        from custom_components.voice_automation_ai import _build_llm_client_kwargs
+
+        config = {"provider": "ollama", "temperature": 0.7, "top_p": 0.9}
+        kwargs = _build_llm_client_kwargs(config)
+        assert kwargs["temperature"] == 0.7
+        assert kwargs["top_p"] == 0.9
+
+    def test_ollama_gen_params_default_none(self):
+        from custom_components.voice_automation_ai import _build_llm_client_kwargs
+
+        config = {"provider": "ollama"}
+        kwargs = _build_llm_client_kwargs(config)
+        assert kwargs["temperature"] is None
+        assert kwargs["top_p"] is None

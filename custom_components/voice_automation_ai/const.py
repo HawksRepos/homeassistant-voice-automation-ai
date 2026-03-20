@@ -32,6 +32,8 @@ DEFAULT_LANGUAGE = "en"
 # Options keys (runtime-tunable via Options Flow)
 CONF_MAX_TOKENS = "max_tokens"
 CONF_MAX_HISTORY_TURNS = "max_history_turns"
+CONF_TEMPERATURE = "temperature"
+CONF_TOP_P = "top_p"
 
 # Defaults for options
 DEFAULT_MAX_TOKENS = 4096
@@ -82,6 +84,10 @@ SERVICE_DELETE_SCENE = "delete_scene"
 SERVICE_LIST_AUTOMATIONS = "list_automations"
 SERVICE_LIST_SCRIPTS = "list_scripts"
 SERVICE_LIST_SCENES = "list_scenes"
+SERVICE_CREATE_BLUEPRINT = "create_blueprint"
+SERVICE_EDIT_BLUEPRINT = "edit_blueprint"
+SERVICE_DELETE_BLUEPRINT = "delete_blueprint"
+SERVICE_LIST_BLUEPRINTS = "list_blueprints"
 
 # Attributes
 ATTR_DESCRIPTION = "description"
@@ -91,6 +97,8 @@ ATTR_AUTOMATION_ID = "automation_id"
 ATTR_YAML_CONTENT = "yaml_content"
 ATTR_SCRIPT_NAME = "script_name"
 ATTR_SCENE_ID = "scene_id"
+ATTR_BLUEPRINT_NAME = "blueprint_name"
+ATTR_BLUEPRINT_DOMAIN = "blueprint_domain"
 
 # API
 API_TIMEOUT = 30

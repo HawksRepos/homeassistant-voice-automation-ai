@@ -1,8 +1,10 @@
 """Tests for LLM client abstraction layer."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from custom_components.voice_automation_ai.llm_client import (
@@ -13,6 +15,77 @@ from custom_components.voice_automation_ai.llm_client import (
     OllamaClient,
     create_llm_client,
 )
+
+
+# ── Async helper for mocking aiohttp ──
+
+
+class _AsyncContextManager:
+    """Helper to mock async context managers (aiohttp sessions/responses)."""
+
+    def __init__(self, return_value):
+        self._return_value = return_value
+
+    async def __aenter__(self):
+        return self._return_value
+
+    async def __aexit__(self, *args):
+        pass
+
+
+class _AsyncLineIterator:
+    """Mock async iterator for streaming response lines."""
+
+    def __init__(self, lines: list[bytes]):
+        self._items = iter(lines)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._items)
+        except StopIteration:
+            raise StopAsyncIteration
+
+
+def _mock_aiohttp_session(response_json=None, stream_lines=None, get_json=None, raise_error=None):
+    """Create a mock aiohttp.ClientSession for testing.
+
+    Args:
+        response_json: JSON dict for non-streaming POST response
+        stream_lines: list of bytes for streaming response
+        get_json: JSON dict for GET response
+        raise_error: exception to raise on request
+    """
+    mock_session = MagicMock()
+
+    if raise_error:
+        mock_session.post = MagicMock(side_effect=raise_error)
+        mock_session.get = MagicMock(side_effect=raise_error)
+    else:
+        if response_json is not None:
+            mock_resp = MagicMock()
+            mock_resp.json = AsyncMock(return_value=response_json)
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.status = 200
+            mock_session.post = MagicMock(return_value=_AsyncContextManager(mock_resp))
+
+        if stream_lines is not None:
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.status = 200
+            mock_resp.content = _AsyncLineIterator(stream_lines)
+            mock_session.post = MagicMock(return_value=_AsyncContextManager(mock_resp))
+
+        if get_json is not None:
+            mock_get_resp = MagicMock()
+            mock_get_resp.json = AsyncMock(return_value=get_json)
+            mock_get_resp.raise_for_status = MagicMock()
+            mock_get_resp.status = 200
+            mock_session.get = MagicMock(return_value=_AsyncContextManager(mock_get_resp))
+
+    return _AsyncContextManager(mock_session)
 
 
 # ── LLMResponse ──
@@ -58,8 +131,8 @@ class TestLLMResponse:
 class TestToolDefinitions:
     """Tests for the unified TOOL_DEFINITIONS structure."""
 
-    def test_all_14_tools_defined(self):
-        assert len(TOOL_DEFINITIONS) == 14
+    def test_all_19_tools_defined(self):
+        assert len(TOOL_DEFINITIONS) == 19
 
     def test_every_tool_has_required_keys(self):
         for tool in TOOL_DEFINITIONS:
@@ -85,6 +158,24 @@ class TestToolDefinitions:
         names = [t["name"] for t in TOOL_DEFINITIONS]
         assert len(names) == len(set(names))
 
+    def test_blueprint_tools_exist(self):
+        bp_tools = [t["name"] for t in TOOL_DEFINITIONS if "blueprint" in t["name"]]
+        assert set(bp_tools) == {
+            "list_blueprints", "read_blueprint",
+            "create_blueprint", "edit_blueprint", "delete_blueprint",
+        }
+
+
+# ── BaseLLMClient async defaults ──
+
+
+class TestBaseLLMClientAsync:
+    """Test async method defaults on BaseLLMClient."""
+
+    def test_is_async_default_false(self):
+        client = BaseLLMClient()
+        assert client.is_async is False
+
 
 # ── Anthropic tool conversion ──
 
@@ -96,7 +187,7 @@ class TestAnthropicToolConversion:
         client = AnthropicClient.__new__(AnthropicClient)
         tools = client._to_anthropic_tools()
 
-        assert len(tools) == 14
+        assert len(tools) == 19
         for tool in tools:
             assert "name" in tool
             assert "description" in tool
@@ -224,7 +315,7 @@ class TestOllamaToolConversion:
         client = OllamaClient.__new__(OllamaClient)
         tools = client._to_ollama_tools()
 
-        assert len(tools) == 14
+        assert len(tools) == 19
         for tool in tools:
             assert tool["type"] == "function"
             assert "function" in tool
@@ -271,37 +362,105 @@ class TestOllamaAddToolResults:
         assert messages[2]["role"] == "tool"
 
 
-# ── Ollama create_message ──
+# ── Ollama is_async ──
 
 
-class TestOllamaCreateMessage:
-    """Test Ollama create_message with mocked HTTP."""
+class TestOllamaIsAsync:
+    """Test OllamaClient is_async property."""
 
-    @patch("custom_components.voice_automation_ai.llm_client.requests")
-    def test_text_response(self, mock_requests):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "message": {"role": "assistant", "content": "Hello from Ollama!"}
-        }
-        mock_resp.raise_for_status = MagicMock()
-        mock_requests.post.return_value = mock_resp
+    def test_is_async_true(self):
+        client = OllamaClient()
+        assert client.is_async is True
 
-        client = OllamaClient(host="http://localhost:11434")
-        result = client.create_message(
-            model="llama3.1",
-            system_prompt="test",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=100,
-            tools=False,
-        )
+    def test_sync_methods_raise(self):
+        client = OllamaClient()
+        with pytest.raises(NotImplementedError):
+            client.create_message()
+        with pytest.raises(NotImplementedError):
+            client.create_simple_message()
+        with pytest.raises(NotImplementedError):
+            client.validate_connection()
 
-        assert result.text == "Hello from Ollama!"
+
+# ── Ollama _build_options ──
+
+
+class TestOllamaBuildOptions:
+    """Test OllamaClient._build_options."""
+
+    def test_basic_options(self):
+        client = OllamaClient()
+        options = client._build_options(4096)
+        assert options["num_predict"] == 4096
+        assert "temperature" not in options
+        assert "top_p" not in options
+
+    def test_with_temperature(self):
+        client = OllamaClient(temperature=0.7)
+        options = client._build_options(4096)
+        assert options["temperature"] == 0.7
+
+    def test_with_top_p(self):
+        client = OllamaClient(top_p=0.9)
+        options = client._build_options(4096)
+        assert options["top_p"] == 0.9
+
+    def test_with_both(self):
+        client = OllamaClient(temperature=0.5, top_p=0.8)
+        options = client._build_options(1024)
+        assert options["num_predict"] == 1024
+        assert options["temperature"] == 0.5
+        assert options["top_p"] == 0.8
+
+
+# ── Ollama tool call IDs ──
+
+
+class TestOllamaToolCallIds:
+    """Test OllamaClient generates unique tool call IDs."""
+
+    def test_ids_are_unique(self):
+        client = OllamaClient()
+        ids = {client._next_tool_call_id() for _ in range(100)}
+        assert len(ids) == 100
+
+    def test_id_format(self):
+        client = OllamaClient()
+        tc_id = client._next_tool_call_id()
+        assert tc_id.startswith("call_")
+        assert len(tc_id) == 17  # "call_" + 12 hex chars
+
+
+# ── Ollama async_create_message ──
+
+
+class TestOllamaAsyncCreateMessage:
+    """Test Ollama async_create_message with mocked aiohttp."""
+
+    async def test_text_response(self):
+        # Build streaming response (NDJSON lines)
+        stream_lines = [
+            json.dumps({"message": {"role": "assistant", "content": "Hello "}, "done": False}).encode() + b"\n",
+            json.dumps({"message": {"role": "assistant", "content": "world!"}, "done": True}).encode() + b"\n",
+        ]
+        mock_session = _mock_aiohttp_session(stream_lines=stream_lines)
+
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient(host="http://localhost:11434")
+            result = await client.async_create_message(
+                model="llama3.1",
+                system_prompt="test",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=100,
+                tools=False,
+            )
+
+        assert result.text == "Hello world!"
         assert result.has_tool_calls is False
 
-    @patch("custom_components.voice_automation_ai.llm_client.requests")
-    def test_tool_call_response(self, mock_requests):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
+    async def test_tool_call_response(self):
+        # Tool calls come in the final message
+        final_msg = {
             "message": {
                 "role": "assistant",
                 "content": "",
@@ -317,96 +476,144 @@ class TestOllamaCreateMessage:
                         }
                     }
                 ],
-            }
+            },
+            "done": True,
         }
-        mock_resp.raise_for_status = MagicMock()
-        mock_requests.post.return_value = mock_resp
+        stream_lines = [json.dumps(final_msg).encode() + b"\n"]
+        mock_session = _mock_aiohttp_session(stream_lines=stream_lines)
 
-        client = OllamaClient()
-        result = client.create_message(
-            model="llama3.1",
-            system_prompt="test",
-            messages=[{"role": "user", "content": "turn on living room light"}],
-            max_tokens=100,
-        )
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            result = await client.async_create_message(
+                model="llama3.1",
+                system_prompt="test",
+                messages=[{"role": "user", "content": "turn on light"}],
+                max_tokens=100,
+            )
 
         assert result.has_tool_calls is True
         assert result.tool_calls[0]["name"] == "call_service"
         assert result.tool_calls[0]["arguments"]["domain"] == "light"
+        # ID should be a generated unique ID
+        assert result.tool_calls[0]["id"].startswith("call_")
 
-    @patch("custom_components.voice_automation_ai.llm_client.requests")
-    def test_empty_content_returns_none_text(self, mock_requests):
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
-            "message": {"role": "assistant", "content": ""}
-        }
-        mock_resp.raise_for_status = MagicMock()
-        mock_requests.post.return_value = mock_resp
+    async def test_empty_content_returns_none_text(self):
+        stream_lines = [
+            json.dumps({"message": {"role": "assistant", "content": ""}, "done": True}).encode() + b"\n",
+        ]
+        mock_session = _mock_aiohttp_session(stream_lines=stream_lines)
 
-        client = OllamaClient()
-        result = client.create_message(
-            model="llama3.1",
-            system_prompt="test",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=100,
-            tools=False,
-        )
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            result = await client.async_create_message(
+                model="llama3.1",
+                system_prompt="test",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=100,
+                tools=False,
+            )
+
         assert result.text is None
 
 
-# ── Ollama validate_connection ──
+# ── Ollama async_create_simple_message ──
 
 
-class TestOllamaValidateConnection:
-    """Test Ollama connection validation."""
+class TestOllamaAsyncCreateSimpleMessage:
+    """Test Ollama async_create_simple_message."""
 
-    @patch("custom_components.voice_automation_ai.llm_client.requests")
-    def test_model_available(self, mock_requests):
-        import requests as real_requests
+    async def test_returns_stripped_text(self):
+        response_json = {
+            "message": {"role": "assistant", "content": "  Hello from Ollama!  "}
+        }
+        mock_session = _mock_aiohttp_session(response_json=response_json)
 
-        mock_requests.ConnectionError = real_requests.ConnectionError
-        mock_requests.RequestException = real_requests.RequestException
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            result = await client.async_create_simple_message(
+                model="llama3.1",
+                prompt="hi",
+                max_tokens=100,
+            )
 
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
+        assert result == "Hello from Ollama!"
+
+
+# ── Ollama async_validate_connection ──
+
+
+class TestOllamaAsyncValidateConnection:
+    """Test Ollama async connection validation."""
+
+    async def test_model_available(self):
+        get_json = {
             "models": [{"name": "llama3.1:latest"}, {"name": "mistral:latest"}]
         }
-        mock_resp.raise_for_status = MagicMock()
-        mock_requests.get.return_value = mock_resp
+        mock_session = _mock_aiohttp_session(get_json=get_json)
 
-        client = OllamaClient()
-        client.validate_connection("llama3.1")  # should not raise
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            await client.async_validate_connection("llama3.1")  # should not raise
 
-    @patch("custom_components.voice_automation_ai.llm_client.requests")
-    def test_model_missing(self, mock_requests):
-        import requests as real_requests
-
-        # Must set real exception classes so except clauses work
-        mock_requests.ConnectionError = real_requests.ConnectionError
-        mock_requests.RequestException = real_requests.RequestException
-
-        mock_resp = MagicMock()
-        mock_resp.json.return_value = {
+    async def test_model_missing(self):
+        get_json = {
             "models": [{"name": "mistral:latest"}]
         }
-        mock_resp.raise_for_status = MagicMock()
-        mock_requests.get.return_value = mock_resp
+        mock_session = _mock_aiohttp_session(get_json=get_json)
 
-        client = OllamaClient()
-        with pytest.raises(ConnectionError, match="not found"):
-            client.validate_connection("llama3.1")
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            with pytest.raises(ConnectionError, match="not found"):
+                await client.async_validate_connection("llama3.1")
 
-    @patch("custom_components.voice_automation_ai.llm_client.requests")
-    def test_connection_refused(self, mock_requests):
-        import requests as real_requests
+    async def test_connection_refused(self):
+        mock_session = _mock_aiohttp_session(
+            raise_error=aiohttp.ClientConnectorError(
+                MagicMock(), OSError("refused")
+            )
+        )
 
-        mock_requests.ConnectionError = real_requests.ConnectionError
-        mock_requests.RequestException = real_requests.RequestException
-        mock_requests.get.side_effect = real_requests.ConnectionError("refused")
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            with pytest.raises(ConnectionError, match="Cannot connect"):
+                await client.async_validate_connection("llama3.1")
 
-        client = OllamaClient()
-        with pytest.raises(ConnectionError, match="Cannot connect"):
-            client.validate_connection("llama3.1")
+
+# ── Ollama async_fetch_models ──
+
+
+class TestOllamaAsyncFetchModels:
+    """Test Ollama model discovery."""
+
+    async def test_fetches_models(self):
+        get_json = {
+            "models": [
+                {"name": "llama3.1:latest", "size": 4_000_000_000, "details": {"parameter_size": "8B"}},
+                {"name": "mistral:latest", "size": 3_500_000_000, "details": {}},
+            ]
+        }
+        mock_session = _mock_aiohttp_session(get_json=get_json)
+
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            models = await client.async_fetch_models()
+
+        assert "llama3.1:latest" in models
+        assert "mistral:latest" in models
+        assert "8B" in models["llama3.1:latest"]
+
+    async def test_returns_empty_on_error(self):
+        mock_session = _mock_aiohttp_session(
+            raise_error=aiohttp.ClientConnectorError(
+                MagicMock(), OSError("refused")
+            )
+        )
+
+        with patch("custom_components.voice_automation_ai.llm_client.aiohttp.ClientSession", return_value=mock_session):
+            client = OllamaClient()
+            models = await client.async_fetch_models()
+
+        assert models == {}
 
 
 # ── Factory ──
@@ -427,6 +634,12 @@ class TestCreateLLMClientFactory:
     def test_create_ollama_default_host(self):
         client = create_llm_client("ollama")
         assert isinstance(client, OllamaClient)
+
+    def test_create_ollama_with_gen_params(self):
+        client = create_llm_client("ollama", temperature=0.7, top_p=0.9)
+        assert isinstance(client, OllamaClient)
+        assert client._temperature == 0.7
+        assert client._top_p == 0.9
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError, match="Unknown LLM provider"):

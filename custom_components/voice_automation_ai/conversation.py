@@ -9,6 +9,19 @@ from typing import Any
 
 import yaml
 
+
+class _InputLoader(yaml.SafeLoader):
+    """YAML loader that handles !input tags as plain strings."""
+
+    pass
+
+
+def _input_constructor(loader, node):
+    return f"!input {loader.construct_scalar(node)}"
+
+
+_InputLoader.add_constructor("!input", _input_constructor)
+
 from homeassistant.components.conversation import (
     ConversationEntity,
     ConversationInput,
@@ -30,6 +43,8 @@ from .const import (
     CONF_MODEL,
     CONF_OLLAMA_HOST,
     CONF_PROVIDER,
+    CONF_TEMPERATURE,
+    CONF_TOP_P,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_HISTORY_TURNS,
     DEFAULT_MAX_TOKENS,
@@ -53,7 +68,7 @@ MAX_TOOL_ROUNDS = 5
 MAX_CONVERSATIONS = 50
 
 SYSTEM_PROMPT = """You are a Home Assistant smart home assistant. You can control \
-devices and manage automations, scripts, and scenes.
+devices and manage automations, scripts, scenes, and blueprints.
 
 You can:
 1. Control devices - turn on/off lights, lock doors, set temperatures, etc. \
@@ -62,6 +77,10 @@ Use the call_service tool.
 3. Manage automations - create, edit, delete, and list automations.
 4. Manage scripts - create, edit, delete, and list scripts.
 5. Manage scenes - create, edit, delete, and list scenes.
+6. Manage blueprints - create, read, edit, delete, and list blueprints. \
+Blueprints are reusable templates. Changes to a blueprint affect ALL \
+automations/scripts using it. Blueprint YAML uses !input tags for \
+configurable parameters.
 
 Guidelines:
 - Always use the tools to perform actions - never just describe what to do.
@@ -69,6 +88,8 @@ Guidelines:
 - For automations: YAML dict with alias, description, mode, trigger, condition, action.
 - For scripts: YAML dict with alias, description, mode, sequence.
 - For scenes: YAML dict with name, id, entities.
+- For blueprints: YAML with blueprint key (name, description, domain, input), \
+triggers, conditions, actions. Use !input to reference inputs.
 - Only use entity IDs that exist (listed below).
 - When editing, preserve fields the user didn't ask to change.
 - Before deleting, confirm what will be removed.
@@ -135,6 +156,8 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 provider,
                 host=config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
                 timeout=OLLAMA_TIMEOUT,
+                temperature=config.get(CONF_TEMPERATURE),
+                top_p=config.get(CONF_TOP_P),
             )
 
     async def async_process(
@@ -172,9 +195,24 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
             response_text = await self._call_with_tools(
                 client, model, system_prompt, messages, max_tokens
             )
+        except ConnectionError as err:
+            _LOGGER.error("LLM connection error: %s", err)
+            response_text = (
+                "Sorry, I could not reach the language model. "
+                "Please check that the service is running and accessible."
+            )
+        except TimeoutError as err:
+            _LOGGER.error("LLM request timed out: %s", err)
+            response_text = (
+                "Sorry, the language model took too long to respond. "
+                "Try a shorter request or check if the model is overloaded."
+            )
         except Exception as err:
-            _LOGGER.error("Error in conversation: %s", err)
-            response_text = f"Sorry, I encountered an error: {err}"
+            _LOGGER.error("Error in conversation: %s", err, exc_info=True)
+            response_text = (
+                "Sorry, I encountered an unexpected error. "
+                "Check the Home Assistant logs for details."
+            )
 
         # Only store clean user/assistant text in history (no tool exchanges)
         history.append({"role": "user", "content": user_input.text})
@@ -208,19 +246,23 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
     ) -> str:
         """Call LLM with tool-use support, handling tool calls in a loop."""
 
-        def _create_message(msgs: list[dict]) -> Any:
-            return client.create_message(
-                model=model,
-                system_prompt=system_prompt,
-                messages=msgs,
-                max_tokens=max_tokens,
-                tools=True,
-            )
+        async def _do_create_message(msgs: list[dict]) -> Any:
+            if client.is_async:
+                return await client.async_create_message(
+                    model=model,
+                    system_prompt=system_prompt,
+                    messages=msgs,
+                    max_tokens=max_tokens,
+                    tools=True,
+                )
+            else:
+                return await self.hass.async_add_executor_job(
+                    client.create_message,
+                    model, system_prompt, msgs, max_tokens, True,
+                )
 
         for _round in range(MAX_TOOL_ROUNDS):
-            response = await self.hass.async_add_executor_job(
-                _create_message, messages
-            )
+            response = await _do_create_message(messages)
 
             if response.has_tool_calls:
                 tool_results = []
@@ -241,14 +283,44 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
     def _check_yaml_for_blocked_services(data: dict | list) -> str | None:
         """Scan parsed YAML for references to blocked service domains.
 
+        Recursively walks the data structure checking 'service' and 'action' keys,
+        including nested choose/parallel/if-then/repeat/sequence blocks.
         Returns an error message if a blocked service is found, else None.
         """
-        text = yaml.dump(data, default_flow_style=False)
-        for domain in BLOCKED_SERVICE_DOMAINS:
-            # Check for "service: domain." or "domain.service_name" patterns
-            if f"service: {domain}." in text or f" {domain}." in text:
-                return f"Blocked: generated YAML references restricted service domain '{domain}'."
-        return None
+
+        def _check_value(value) -> str | None:
+            if isinstance(value, dict):
+                for key in ("service", "action"):
+                    svc = value.get(key)
+                    if isinstance(svc, str) and "." in svc:
+                        svc_domain = svc.split(".")[0]
+                        if svc_domain in BLOCKED_SERVICE_DOMAINS:
+                            return (
+                                f"Blocked: generated YAML references restricted "
+                                f"service domain '{svc_domain}'."
+                            )
+                for key in (
+                    "action", "sequence", "then", "else", "default",
+                    "choose", "parallel", "repeat",
+                ):
+                    nested = value.get(key)
+                    if nested is not None:
+                        result = _check_value(nested)
+                        if result:
+                            return result
+                for v in value.values():
+                    if isinstance(v, (dict, list)):
+                        result = _check_value(v)
+                        if result:
+                            return result
+            elif isinstance(value, list):
+                for item in value:
+                    result = _check_value(item)
+                    if result:
+                        return result
+            return None
+
+        return _check_value(data)
 
     async def _execute_tool(self, tool_name: str, tool_input: dict) -> dict:
         """Execute a tool call and return the result."""
@@ -407,6 +479,54 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                     "attributes": safe_attrs,
                 }
 
+            # ── Blueprint tools ──
+
+            elif tool_name == "list_blueprints":
+                bp_domain = tool_input.get("domain", "automation")
+                blueprints = await fm.read_blueprints(bp_domain)
+                return {"success": True, "count": len(blueprints), "blueprints": blueprints}
+
+            elif tool_name == "read_blueprint":
+                bp_domain = tool_input.get("domain", "automation")
+                content = await fm.read_blueprint(bp_domain, tool_input["blueprint_name"])
+                return {"success": True, "blueprint_name": tool_input["blueprint_name"], "content": content}
+
+            elif tool_name == "create_blueprint":
+                bp_domain = tool_input.get("domain", "automation")
+                yaml_content = tool_input["yaml_content"]
+                # Security: check for blocked services using !input-aware loader
+                try:
+                    data = yaml.load(yaml_content, Loader=_InputLoader)
+                    if data:
+                        blocked = self._check_yaml_for_blocked_services(data)
+                        if blocked:
+                            return {"success": False, "error": blocked}
+                except yaml.YAMLError as err:
+                    _LOGGER.warning("Blueprint YAML parse failed during security check: %s", err)
+                    return {"success": False, "error": "Blueprint YAML could not be parsed for security validation."}
+                await fm.add_blueprint(bp_domain, tool_input["blueprint_name"], yaml_content)
+                return {"success": True, "blueprint_name": tool_input["blueprint_name"]}
+
+            elif tool_name == "edit_blueprint":
+                bp_domain = tool_input.get("domain", "automation")
+                yaml_content = tool_input["yaml_content"]
+                try:
+                    data = yaml.load(yaml_content, Loader=_InputLoader)
+                    if data:
+                        blocked = self._check_yaml_for_blocked_services(data)
+                        if blocked:
+                            return {"success": False, "error": blocked}
+                except yaml.YAMLError as err:
+                    _LOGGER.warning("Blueprint YAML parse failed during security check: %s", err)
+                    return {"success": False, "error": "Blueprint YAML could not be parsed for security validation."}
+                await fm.update_blueprint(bp_domain, tool_input["blueprint_name"], yaml_content)
+                return {"success": True, "blueprint_name": tool_input["blueprint_name"]}
+
+            elif tool_name == "delete_blueprint":
+                bp_domain = tool_input.get("domain", "automation")
+                await fm.delete_blueprint(bp_domain, tool_input["blueprint_name"])
+                return {"success": True, "blueprint_name": tool_input["blueprint_name"]}
+
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
 
@@ -417,5 +537,5 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         except ValueError as err:
             return {"success": False, "error": str(err)}
         except Exception as err:
-            _LOGGER.error("Tool execution error (%s): %s", tool_name, err)
-            return {"success": False, "error": str(err)}
+            _LOGGER.error("Tool execution error (%s): %s", tool_name, err, exc_info=True)
+            return {"success": False, "error": "An unexpected error occurred. Check the logs for details."}

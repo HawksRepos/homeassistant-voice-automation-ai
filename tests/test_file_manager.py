@@ -285,3 +285,173 @@ class TestGetEntitiesContext:
         light_idx = next(i for i, line in enumerate(lines) if line.startswith("light:"))
         sensor_idx = next(i for i, line in enumerate(lines) if line.startswith("sensor:"))
         assert light_idx < sensor_idx
+
+
+# ── Blueprint CRUD ──
+
+
+class TestBlueprintCRUD:
+    """Test blueprint file operations."""
+
+    async def test_read_empty(self, file_manager):
+        result = await file_manager.read_blueprints("automation")
+        assert result == []
+
+    async def test_add_and_list(self, file_manager):
+        yaml_content = (
+            "blueprint:\n"
+            "  name: Motion Light\n"
+            "  description: Turn on light on motion\n"
+            "  domain: automation\n"
+            "  input:\n"
+            "    motion_sensor:\n"
+            "      name: Motion Sensor\n"
+            "      selector:\n"
+            "        entity:\n"
+            "          domain: binary_sensor\n"
+            "trigger:\n"
+            "  - platform: state\n"
+            "    entity_id: !input motion_sensor\n"
+            "    to: 'on'\n"
+            "action:\n"
+            "  - service: light.turn_on\n"
+        )
+        name = await file_manager.add_blueprint("automation", "motion_light", yaml_content)
+        assert name == "motion_light"
+
+        blueprints = await file_manager.read_blueprints("automation")
+        assert len(blueprints) == 1
+        assert blueprints[0]["name"] == "motion_light"
+        assert blueprints[0]["blueprint_name"] == "Motion Light"
+
+    async def test_read_blueprint_returns_raw_yaml(self, file_manager):
+        yaml_content = "blueprint:\n  name: Test\n  domain: automation\ntrigger: !input my_trigger\n"
+        await file_manager.add_blueprint("automation", "test_bp", yaml_content)
+
+        raw = await file_manager.read_blueprint("automation", "test_bp")
+        assert "!input" in raw or "!input" in yaml_content
+        assert "blueprint:" in raw
+
+    async def test_update_blueprint(self, file_manager):
+        original = "blueprint:\n  name: Original\n  domain: automation\n"
+        await file_manager.add_blueprint("automation", "update_test", original)
+
+        updated = "blueprint:\n  name: Updated\n  domain: automation\n"
+        await file_manager.update_blueprint("automation", "update_test", updated)
+
+        raw = await file_manager.read_blueprint("automation", "update_test")
+        assert "Updated" in raw
+
+    async def test_update_nonexistent_raises(self, file_manager):
+        with pytest.raises(ValueError, match="not found"):
+            await file_manager.update_blueprint("automation", "nonexistent", "content")
+
+    async def test_delete_blueprint(self, file_manager):
+        yaml_content = "blueprint:\n  name: Delete Me\n  domain: automation\n"
+        await file_manager.add_blueprint("automation", "delete_me", yaml_content)
+        await file_manager.delete_blueprint("automation", "delete_me")
+
+        blueprints = await file_manager.read_blueprints("automation")
+        assert len(blueprints) == 0
+
+    async def test_delete_nonexistent_raises(self, file_manager):
+        with pytest.raises(ValueError, match="not found"):
+            await file_manager.delete_blueprint("automation", "nonexistent")
+
+    async def test_duplicate_name_raises(self, file_manager):
+        yaml_content = "blueprint:\n  name: Test\n  domain: automation\n"
+        await file_manager.add_blueprint("automation", "dup_test", yaml_content)
+
+        with pytest.raises(ValueError, match="already exists"):
+            await file_manager.add_blueprint("automation", "dup_test", yaml_content)
+
+    async def test_invalid_name_raises(self, file_manager):
+        with pytest.raises(ValueError, match="Invalid blueprint name"):
+            await file_manager.add_blueprint("automation", "invalid name!", "content")
+
+    async def test_script_domain(self, file_manager):
+        yaml_content = "blueprint:\n  name: Script BP\n  domain: script\n"
+        await file_manager.add_blueprint("script", "script_bp", yaml_content)
+
+        blueprints = await file_manager.read_blueprints("script")
+        assert len(blueprints) == 1
+        assert blueprints[0]["name"] == "script_bp"
+
+    async def test_input_tag_preserved_in_metadata(self, file_manager):
+        """Blueprint metadata reader should handle !input tags without errors."""
+        yaml_content = (
+            "blueprint:\n"
+            "  name: Input Test\n"
+            "  description: Tests !input handling\n"
+            "  domain: automation\n"
+            "  input:\n"
+            "    target_light:\n"
+            "      name: Light\n"
+            "trigger:\n"
+            "  - platform: state\n"
+            "    entity_id: !input target_light\n"
+        )
+        await file_manager.add_blueprint("automation", "input_test", yaml_content)
+
+        blueprints = await file_manager.read_blueprints("automation")
+        assert len(blueprints) == 1
+        assert blueprints[0]["blueprint_name"] == "Input Test"
+
+
+# ── Security: Path traversal and domain validation ──
+
+
+class TestBlueprintSecurity:
+    """Test blueprint security: path traversal prevention and domain validation."""
+
+    async def test_path_traversal_in_name_read(self, file_manager):
+        """read_blueprint should reject names with path traversal."""
+        with pytest.raises(ValueError, match="Invalid blueprint name"):
+            await file_manager.read_blueprint("automation", "../../secrets")
+
+    async def test_path_traversal_in_name_update(self, file_manager):
+        """update_blueprint should reject names with path traversal."""
+        with pytest.raises(ValueError, match="Invalid blueprint name"):
+            await file_manager.update_blueprint("automation", "../../../etc/passwd", "content")
+
+    async def test_path_traversal_in_name_delete(self, file_manager):
+        """delete_blueprint should reject names with path traversal."""
+        with pytest.raises(ValueError, match="Invalid blueprint name"):
+            await file_manager.delete_blueprint("automation", "../../automations")
+
+    async def test_path_traversal_in_name_add(self, file_manager):
+        """add_blueprint should reject names with path traversal."""
+        with pytest.raises(ValueError, match="Invalid blueprint name"):
+            await file_manager.add_blueprint("automation", "../escape", "content")
+
+    async def test_slash_in_name_rejected(self, file_manager):
+        """Names containing slashes should be rejected."""
+        with pytest.raises(ValueError, match="Invalid blueprint name"):
+            await file_manager.add_blueprint("automation", "sub/dir/file", "content")
+
+    async def test_invalid_domain_rejected(self, file_manager):
+        """Invalid blueprint domains should be rejected."""
+        with pytest.raises(ValueError, match="Invalid blueprint domain"):
+            await file_manager.read_blueprints("../../../etc")
+
+    async def test_invalid_domain_in_add(self, file_manager):
+        """add_blueprint should reject invalid domains."""
+        with pytest.raises(ValueError, match="Invalid blueprint domain"):
+            await file_manager.add_blueprint("homeassistant", "test", "content")
+
+    async def test_invalid_domain_in_delete(self, file_manager):
+        """delete_blueprint should reject invalid domains."""
+        with pytest.raises(ValueError, match="Invalid blueprint domain"):
+            await file_manager.delete_blueprint("../../tmp", "test")
+
+    async def test_valid_domains_accepted(self, file_manager):
+        """Valid domains 'automation' and 'script' should work."""
+        yaml_content = "blueprint:\n  name: Test\n  domain: automation\n"
+        await file_manager.add_blueprint("automation", "valid_auto", yaml_content)
+        result = await file_manager.read_blueprints("automation")
+        assert len(result) == 1
+
+        yaml_content2 = "blueprint:\n  name: Test2\n  domain: script\n"
+        await file_manager.add_blueprint("script", "valid_script", yaml_content2)
+        result2 = await file_manager.read_blueprints("script")
+        assert len(result2) == 1

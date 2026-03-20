@@ -371,6 +371,159 @@ class TestToolExecutionCRUD:
         assert "Invalid YAML" in result["error"]
 
 
+# ── Blueprint tool execution ──
+
+
+class TestBlueprintToolExecution:
+    """Test blueprint tool dispatch."""
+
+    async def test_list_blueprints(self, agent, file_manager_mock):
+        file_manager_mock.read_blueprints = AsyncMock(
+            return_value=[
+                {"name": "motion_light", "blueprint_name": "Motion Light", "description": ""},
+            ]
+        )
+        result = await agent._execute_tool("list_blueprints", {"domain": "automation"})
+        assert result["success"] is True
+        assert result["count"] == 1
+
+    async def test_list_blueprints_default_domain(self, agent, file_manager_mock):
+        file_manager_mock.read_blueprints = AsyncMock(return_value=[])
+        result = await agent._execute_tool("list_blueprints", {})
+        assert result["success"] is True
+        file_manager_mock.read_blueprints.assert_awaited_once_with("automation")
+
+    async def test_read_blueprint(self, agent, file_manager_mock):
+        file_manager_mock.read_blueprint = AsyncMock(return_value="blueprint:\n  name: Test\n")
+        result = await agent._execute_tool(
+            "read_blueprint", {"blueprint_name": "test", "domain": "automation"}
+        )
+        assert result["success"] is True
+        assert "blueprint:" in result["content"]
+
+    async def test_create_blueprint_safe(self, agent, file_manager_mock):
+        file_manager_mock.add_blueprint = AsyncMock(return_value="new_bp")
+        yaml_content = "blueprint:\n  name: New\n  domain: automation\naction:\n  - service: light.turn_on\n"
+        result = await agent._execute_tool(
+            "create_blueprint",
+            {"blueprint_name": "new_bp", "yaml_content": yaml_content},
+        )
+        assert result["success"] is True
+        file_manager_mock.add_blueprint.assert_awaited_once()
+
+    async def test_create_blueprint_blocked(self, agent, file_manager_mock):
+        file_manager_mock.add_blueprint = AsyncMock()
+        yaml_content = "blueprint:\n  name: Evil\naction:\n  - service: shell_command.hack\n"
+        result = await agent._execute_tool(
+            "create_blueprint",
+            {"blueprint_name": "evil_bp", "yaml_content": yaml_content},
+        )
+        assert result["success"] is False
+        assert "Blocked" in result["error"]
+        file_manager_mock.add_blueprint.assert_not_called()
+
+    async def test_edit_blueprint(self, agent, file_manager_mock):
+        file_manager_mock.update_blueprint = AsyncMock()
+        yaml_content = "blueprint:\n  name: Updated\naction:\n  - service: light.turn_on\n"
+        result = await agent._execute_tool(
+            "edit_blueprint",
+            {"blueprint_name": "test_bp", "yaml_content": yaml_content, "domain": "automation"},
+        )
+        assert result["success"] is True
+        file_manager_mock.update_blueprint.assert_awaited_once()
+
+    async def test_edit_blueprint_blocked(self, agent, file_manager_mock):
+        file_manager_mock.update_blueprint = AsyncMock()
+        yaml_content = "blueprint:\n  name: Evil\naction:\n  - service: python_script.evil\n"
+        result = await agent._execute_tool(
+            "edit_blueprint",
+            {"blueprint_name": "test_bp", "yaml_content": yaml_content},
+        )
+        assert result["success"] is False
+        file_manager_mock.update_blueprint.assert_not_called()
+
+    async def test_delete_blueprint(self, agent, file_manager_mock):
+        file_manager_mock.delete_blueprint = AsyncMock()
+        result = await agent._execute_tool(
+            "delete_blueprint", {"blueprint_name": "test_bp", "domain": "automation"}
+        )
+        assert result["success"] is True
+        file_manager_mock.delete_blueprint.assert_awaited_once_with("automation", "test_bp")
+
+    async def test_create_blueprint_yaml_parse_failure_blocks(self, agent, file_manager_mock):
+        """If blueprint YAML cannot be parsed at all, creation should be rejected."""
+        file_manager_mock.add_blueprint = AsyncMock()
+        # This YAML is totally invalid (not even !input related)
+        yaml_content = "{{{{ invalid yaml {{{"
+        result = await agent._execute_tool(
+            "create_blueprint",
+            {"blueprint_name": "evil", "yaml_content": yaml_content},
+        )
+        assert result["success"] is False
+        assert "could not be parsed" in result["error"]
+        file_manager_mock.add_blueprint.assert_not_called()
+
+    async def test_create_blueprint_with_input_tags(self, agent, file_manager_mock):
+        """Blueprint with !input tags should pass security check (not bypass it)."""
+        file_manager_mock.add_blueprint = AsyncMock(return_value="bp_with_inputs")
+        yaml_content = (
+            "blueprint:\n  name: Test\n  domain: automation\n"
+            "  input:\n    target_light:\n      name: Light\n"
+            "trigger:\n  - platform: state\n    entity_id: !input target_light\n"
+            "action:\n  - service: light.turn_on\n"
+        )
+        result = await agent._execute_tool(
+            "create_blueprint",
+            {"blueprint_name": "bp_with_inputs", "yaml_content": yaml_content},
+        )
+        assert result["success"] is True
+        file_manager_mock.add_blueprint.assert_awaited_once()
+
+    async def test_create_blueprint_blocked_nested_in_choose(self, agent, file_manager_mock):
+        """Blocked services nested in choose should be caught."""
+        file_manager_mock.add_blueprint = AsyncMock()
+        yaml_content = (
+            "blueprint:\n  name: Evil\n  domain: automation\n"
+            "action:\n  - choose:\n    - conditions: []\n"
+            "      sequence:\n        - service: shell_command.run\n"
+        )
+        result = await agent._execute_tool(
+            "create_blueprint",
+            {"blueprint_name": "evil", "yaml_content": yaml_content},
+        )
+        assert result["success"] is False
+        file_manager_mock.add_blueprint.assert_not_called()
+
+
+# ── Security: error handling ──
+
+
+class TestSecurityErrorHandling:
+    """Test that error messages don't leak internal details."""
+
+    async def test_generic_error_does_not_leak_details(self, agent):
+        """The catch-all exception handler should return generic message."""
+        with patch.object(agent, "_call_with_tools", side_effect=RuntimeError("secret internal path /etc/passwd")):
+            user_input = MagicMock()
+            user_input.text = "do something"
+            user_input.conversation_id = "test"
+
+            result = await agent.async_process(user_input)
+            response_text = result.response.speech
+            assert "/etc/passwd" not in response_text
+            assert "unexpected error" in response_text.lower()
+
+    async def test_tool_generic_error_does_not_leak(self, agent, file_manager_mock):
+        """Tool execution generic errors should return generic message."""
+        file_manager_mock.read_automations = AsyncMock(
+            side_effect=RuntimeError("Internal: /config/automations.yaml corrupt")
+        )
+        result = await agent._execute_tool("list_automations", {})
+        assert result["success"] is False
+        assert "/config/" not in result["error"]
+        assert "unexpected error" in result["error"].lower()
+
+
 # ── Conversation history management ──
 
 
@@ -430,6 +583,7 @@ class TestCallWithTools:
         from custom_components.voice_automation_ai.llm_client import LLMResponse
 
         mock_client = MagicMock()
+        mock_client.is_async = False
         mock_client.create_message.return_value = LLMResponse(text="Just text")
 
         result = await agent._call_with_tools(
@@ -453,6 +607,7 @@ class TestCallWithTools:
         ]
 
         mock_client = MagicMock()
+        mock_client.is_async = False
         mock_client.create_message.side_effect = responses
         mock_client.add_tool_results = MagicMock()
 
@@ -475,6 +630,7 @@ class TestCallWithTools:
         )
 
         mock_client = MagicMock()
+        mock_client.is_async = False
         mock_client.create_message.return_value = tool_response
         mock_client.add_tool_results = MagicMock()
 
@@ -488,6 +644,7 @@ class TestCallWithTools:
         from custom_components.voice_automation_ai.llm_client import LLMResponse
 
         mock_client = MagicMock()
+        mock_client.is_async = False
         mock_client.create_message.return_value = LLMResponse(text=None)
 
         result = await agent._call_with_tools(
@@ -529,6 +686,7 @@ class TestHistoryExcludesToolExchanges:
         ]
 
         mock_client = MagicMock()
+        mock_client.is_async = False
         mock_client.create_message.side_effect = responses
         mock_client.add_tool_results = MagicMock()
 
@@ -575,6 +733,7 @@ class TestHistoryExcludesToolExchanges:
         ]
 
         mock_client1 = MagicMock()
+        mock_client1.is_async = False
         mock_client1.create_message.side_effect = responses_turn1
         mock_client1.add_tool_results = MagicMock()
 
@@ -596,6 +755,7 @@ class TestHistoryExcludesToolExchanges:
         ]
 
         mock_client2 = MagicMock()
+        mock_client2.is_async = False
         mock_client2.create_message.side_effect = responses_turn2
         mock_client2.add_tool_results = MagicMock()
 

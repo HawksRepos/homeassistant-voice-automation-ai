@@ -20,6 +20,8 @@ from .const import (
     CONF_MODEL,
     CONF_OLLAMA_HOST,
     CONF_PROVIDER,
+    CONF_TEMPERATURE,
+    CONF_TOP_P,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_HISTORY_TURNS,
     DEFAULT_MAX_TOKENS,
@@ -34,7 +36,7 @@ from .const import (
     PROVIDER_ANTHROPIC,
     PROVIDER_OLLAMA,
 )
-from .llm_client import create_llm_client
+from .llm_client import OllamaClient, create_llm_client
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +48,10 @@ async def validate_connection(
     try:
         client = create_llm_client(provider, **kwargs)
         model = kwargs.get("model", DEFAULT_MODEL)
-        await hass.async_add_executor_job(client.validate_connection, model)
+        if client.is_async:
+            await client.async_validate_connection(model)
+        else:
+            await hass.async_add_executor_job(client.validate_connection, model)
         return {"title": "Voice Automation AI"}
     except Exception as err:
         _LOGGER.error("Connection validation failed: %s", err)
@@ -61,6 +66,8 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Initialize."""
         self._provider: str | None = None
+        self._ollama_host: str | None = None
+        self._discovered_models: dict[str, str] = {}
 
     @staticmethod
     def async_get_options_flow(
@@ -123,8 +130,8 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             except CannotConnect:
                 errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
+            except Exception as err:
+                _LOGGER.error("Unexpected error during Anthropic setup: %s", type(err).__name__)
                 errors["base"] = "unknown"
 
         return self.async_show_form(
@@ -139,7 +146,49 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ollama(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 2b: Ollama configuration."""
+        """Step 2b: Ollama host configuration."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = user_input.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
+            self._ollama_host = host
+
+            # Warn if using unencrypted HTTP over a network
+            if host.startswith("http://") and not any(
+                host.startswith(f"http://{local}")
+                for local in ("localhost", "127.0.0.1", "[::1]")
+            ):
+                _LOGGER.warning(
+                    "Ollama host '%s' uses unencrypted HTTP. "
+                    "Prompts and responses will be transmitted in plaintext.",
+                    host,
+                )
+
+            # Try to discover models from this host
+            try:
+                client = OllamaClient(host=host)
+                self._discovered_models = await client.async_fetch_models()
+            except Exception as err:
+                _LOGGER.warning("Ollama model discovery failed for %s: %s", host, err)
+                self._discovered_models = {}
+
+            if self._discovered_models:
+                return await self.async_step_ollama_model()
+            else:
+                errors["base"] = "cannot_connect"
+
+        return self.async_show_form(
+            step_id="ollama",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_OLLAMA_HOST, default=DEFAULT_OLLAMA_HOST): str,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_ollama_model(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2c: Select Ollama model from discovered models."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -148,7 +197,7 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 info = await validate_connection(
                     self.hass,
                     PROVIDER_OLLAMA,
-                    host=user_input.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+                    host=self._ollama_host,
                     model=model,
                 )
 
@@ -159,7 +208,7 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     title=info["title"],
                     data={
                         CONF_PROVIDER: PROVIDER_OLLAMA,
-                        CONF_OLLAMA_HOST: user_input.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+                        CONF_OLLAMA_HOST: self._ollama_host,
                         CONF_MODEL: model,
                         CONF_LANGUAGE: detected_language,
                     },
@@ -173,15 +222,20 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             except CannotConnect:
                 errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
+            except Exception as err:
+                _LOGGER.error("Unexpected error during Ollama model setup: %s", type(err).__name__)
                 errors["base"] = "unknown"
 
+        # Build model dropdown from discovered models
+        model_options = dict(self._discovered_models)
+        default = DEFAULT_OLLAMA_MODEL
+        if default not in model_options and model_options:
+            default = next(iter(model_options))
+
         return self.async_show_form(
-            step_id="ollama",
+            step_id="ollama_model",
             data_schema=vol.Schema({
-                vol.Optional(CONF_OLLAMA_HOST, default=DEFAULT_OLLAMA_HOST): str,
-                vol.Optional(CONF_MODEL, default=DEFAULT_OLLAMA_MODEL): vol.In(OLLAMA_MODELS),
+                vol.Required(CONF_MODEL, default=default): vol.In(model_options),
             }),
             errors=errors,
         )
@@ -211,7 +265,16 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
             model_options = dict(ANTHROPIC_MODELS)
             default_model = DEFAULT_MODEL
         else:
-            model_options = dict(OLLAMA_MODELS)
+            # Try dynamic model discovery for Ollama
+            host = self._config_entry.data.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
+            try:
+                client = OllamaClient(host=host)
+                model_options = await client.async_fetch_models()
+            except Exception as err:
+                _LOGGER.warning("Ollama model discovery failed for options flow: %s", err)
+                model_options = {}
+            if not model_options:
+                model_options = dict(OLLAMA_MODELS)
             default_model = DEFAULT_OLLAMA_MODEL
 
         # Current values (options -> data -> defaults)
@@ -232,7 +295,7 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
         if current_model not in model_options:
             model_options[current_model] = current_model
 
-        data_schema = vol.Schema({
+        data_schema_fields: dict = {
             vol.Required(CONF_MODEL, default=current_model): vol.In(model_options),
             vol.Required(CONF_LANGUAGE, default=current_language): vol.In(LANGUAGES),
             vol.Required(CONF_MAX_TOKENS, default=current_max_tokens): vol.All(
@@ -241,7 +304,20 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
             vol.Required(CONF_MAX_HISTORY_TURNS, default=current_max_history): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=50)
             ),
-        })
+        }
+
+        # Add generation parameters for Ollama only
+        if provider == PROVIDER_OLLAMA:
+            current_temperature = self._config_entry.options.get(CONF_TEMPERATURE)
+            current_top_p = self._config_entry.options.get(CONF_TOP_P)
+            data_schema_fields[vol.Optional(CONF_TEMPERATURE, default=current_temperature)] = vol.Any(
+                None, vol.All(vol.Coerce(float), vol.Range(min=0.0, max=2.0))
+            )
+            data_schema_fields[vol.Optional(CONF_TOP_P, default=current_top_p)] = vol.Any(
+                None, vol.All(vol.Coerce(float), vol.Range(min=0.0, max=1.0))
+            )
+
+        data_schema = vol.Schema(data_schema_fields)
 
         return self.async_show_form(step_id="init", data_schema=data_schema)
 

@@ -22,14 +22,22 @@
       },
       "ollama": {
         "title": "Ollama Configuration",
-        "description": "Configure your local Ollama instance.",
+        "description": "Enter the URL where your Ollama instance is running.",
         "data": {
-          "ollama_host": "Ollama Host URL",
+          "ollama_host": "Ollama Host URL"
+        },
+        "data_description": {
+          "ollama_host": "URL where Ollama is running (e.g. http://192.168.1.100:11434)"
+        }
+      },
+      "ollama_model": {
+        "title": "Ollama Model Selection",
+        "description": "Select a model from your Ollama instance.",
+        "data": {
           "model": "Model"
         },
         "data_description": {
-          "ollama_host": "URL where Ollama is running (e.g. http://192.168.1.100:11434)",
-          "model": "Which model to use (must be pulled in Ollama first)"
+          "model": "Which model to use for AI responses"
         }
       }
     },
@@ -51,13 +59,17 @@
           "model": "Model",
           "language": "Language",
           "max_tokens": "Max Response Tokens",
-          "max_history_turns": "Conversation History Turns"
+          "max_history_turns": "Conversation History Turns",
+          "temperature": "Temperature",
+          "top_p": "Top P"
         },
         "data_description": {
           "model": "Which LLM model to use for responses",
           "language": "Language for AI responses",
           "max_tokens": "Maximum tokens per LLM response (256-32768)",
-          "max_history_turns": "Number of conversation turns to remember (1-50)"
+          "max_history_turns": "Number of conversation turns to remember (1-50)",
+          "temperature": "Controls randomness (0.0-2.0). Lower = more focused, higher = more creative. Leave empty for model default.",
+          "top_p": "Nucleus sampling (0.0-1.0). Controls diversity of responses. Leave empty for model default."
         }
       }
     }

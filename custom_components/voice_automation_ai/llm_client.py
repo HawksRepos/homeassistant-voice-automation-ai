@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
+import aiohttp
 import anthropic
-import requests
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -115,6 +116,48 @@ TOOL_DEFINITIONS = [
             "entity_id": {"type": "string", "description": "The entity ID to query (e.g. light.living_room, sensor.temperature).", "required": True},
         },
     },
+    # ── Blueprint tools ──
+    {
+        "name": "list_blueprints",
+        "description": "List all blueprints in the blueprints directory. Returns name, description, and domain for each.",
+        "parameters": {
+            "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
+        },
+    },
+    {
+        "name": "read_blueprint",
+        "description": "Read the full YAML content of a blueprint file. Use this before editing to see the current content.",
+        "parameters": {
+            "blueprint_name": {"type": "string", "description": "The blueprint filename without .yaml extension.", "required": True},
+            "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
+        },
+    },
+    {
+        "name": "create_blueprint",
+        "description": "Create a new blueprint file. The YAML must include a 'blueprint:' key with name, description, domain, and input definitions. Use !input tags for configurable parameters.",
+        "parameters": {
+            "blueprint_name": {"type": "string", "description": "Filename for the blueprint (lowercase, underscores, no .yaml extension).", "required": True},
+            "yaml_content": {"type": "string", "description": "The complete blueprint YAML content including blueprint metadata, triggers, conditions, and actions.", "required": True},
+            "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
+        },
+    },
+    {
+        "name": "edit_blueprint",
+        "description": "Edit an existing blueprint by replacing its content. Changes propagate to ALL automations/scripts using this blueprint after reload.",
+        "parameters": {
+            "blueprint_name": {"type": "string", "description": "The blueprint filename without .yaml extension.", "required": True},
+            "yaml_content": {"type": "string", "description": "The complete updated blueprint YAML content.", "required": True},
+            "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
+        },
+    },
+    {
+        "name": "delete_blueprint",
+        "description": "Delete a blueprint file. Warning: automations/scripts using this blueprint will break.",
+        "parameters": {
+            "blueprint_name": {"type": "string", "description": "The blueprint filename without .yaml extension.", "required": True},
+            "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
+        },
+    },
 ]
 
 
@@ -173,6 +216,37 @@ class BaseLLMClient:
     def validate_connection(self, model: str) -> None:
         """Validate the connection works. Raises on failure."""
         raise NotImplementedError
+
+    # ── Async variants (default: delegate to sync for backwards compatibility) ──
+
+    async def async_create_message(
+        self,
+        model: str,
+        system_prompt: str,
+        messages: list[dict],
+        max_tokens: int,
+        tools: bool = True,
+    ) -> LLMResponse:
+        """Async variant. Default implementation calls sync version."""
+        return self.create_message(model, system_prompt, messages, max_tokens, tools)
+
+    async def async_create_simple_message(
+        self,
+        model: str,
+        prompt: str,
+        max_tokens: int,
+    ) -> str:
+        """Async variant. Default implementation calls sync version."""
+        return self.create_simple_message(model, prompt, max_tokens)
+
+    async def async_validate_connection(self, model: str) -> None:
+        """Async variant. Default implementation calls sync version."""
+        return self.validate_connection(model)
+
+    @property
+    def is_async(self) -> bool:
+        """Whether this client supports native async. Override in subclasses."""
+        return False
 
 
 class AnthropicClient(BaseLLMClient):
@@ -301,12 +375,38 @@ class AnthropicClient(BaseLLMClient):
 
 
 class OllamaClient(BaseLLMClient):
-    """Ollama local LLM client (OpenAI-compatible API)."""
+    """Ollama local LLM client using native async aiohttp."""
 
-    def __init__(self, host: str = "http://localhost:11434", timeout: int = 120) -> None:
+    def __init__(
+        self,
+        host: str = "http://localhost:11434",
+        timeout: int = 120,
+        temperature: float | None = None,
+        top_p: float | None = None,
+    ) -> None:
         """Initialize."""
         self._host = host.rstrip("/")
-        self._timeout = timeout
+        self._timeout = aiohttp.ClientTimeout(total=timeout)
+        self._temperature = temperature
+        self._top_p = top_p
+
+    @property
+    def is_async(self) -> bool:
+        """Ollama client is natively async."""
+        return True
+
+    def _next_tool_call_id(self) -> str:
+        """Generate a unique tool call ID."""
+        return f"call_{uuid.uuid4().hex[:12]}"
+
+    def _build_options(self, max_tokens: int) -> dict:
+        """Build the options dict for Ollama API."""
+        options: dict[str, Any] = {"num_predict": max_tokens}
+        if self._temperature is not None:
+            options["temperature"] = self._temperature
+        if self._top_p is not None:
+            options["top_p"] = self._top_p
+        return options
 
     def _to_ollama_tools(self) -> list[dict]:
         """Convert unified tool defs to Ollama/OpenAI function-calling format."""
@@ -336,7 +436,23 @@ class OllamaClient(BaseLLMClient):
             })
         return tools
 
-    def create_message(
+    # ── Sync methods raise (this client is async-only) ──
+
+    def create_message(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        """Not supported. Use async_create_message."""
+        raise NotImplementedError("OllamaClient is async-only. Use async_create_message.")
+
+    def create_simple_message(self, *args: Any, **kwargs: Any) -> str:
+        """Not supported. Use async_create_simple_message."""
+        raise NotImplementedError("OllamaClient is async-only. Use async_create_simple_message.")
+
+    def validate_connection(self, *args: Any, **kwargs: Any) -> None:
+        """Not supported. Use async_validate_connection."""
+        raise NotImplementedError("OllamaClient is async-only. Use async_validate_connection.")
+
+    # ── Async implementations ──
+
+    async def async_create_message(
         self,
         model: str,
         system_prompt: str,
@@ -344,25 +460,18 @@ class OllamaClient(BaseLLMClient):
         max_tokens: int,
         tools: bool = True,
     ) -> LLMResponse:
-        """Send a message to Ollama."""
+        """Send a message to Ollama with streaming for better timeout handling."""
         ollama_messages = [{"role": "system", "content": system_prompt}] + messages
 
         payload: dict[str, Any] = {
             "model": model,
             "messages": ollama_messages,
-            "stream": False,
-            "options": {"num_predict": max_tokens},
+            "options": self._build_options(max_tokens),
         }
         if tools:
             payload["tools"] = self._to_ollama_tools()
 
-        resp = requests.post(
-            f"{self._host}/api/chat",
-            json=payload,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = await self._post_stream("/api/chat", payload)
 
         message = data.get("message", {})
         text = message.get("content")
@@ -371,7 +480,7 @@ class OllamaClient(BaseLLMClient):
         for tc in message.get("tool_calls", []):
             func = tc.get("function", {})
             tool_calls.append({
-                "id": func.get("name", ""),  # Ollama doesn't always provide IDs
+                "id": self._next_tool_call_id(),
                 "name": func.get("name", ""),
                 "arguments": func.get("arguments", {}),
             })
@@ -382,7 +491,7 @@ class OllamaClient(BaseLLMClient):
             raw_assistant_message=message,
         )
 
-    def create_simple_message(
+    async def async_create_simple_message(
         self,
         model: str,
         prompt: str,
@@ -393,16 +502,9 @@ class OllamaClient(BaseLLMClient):
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-            "options": {"num_predict": max_tokens},
+            "options": self._build_options(max_tokens),
         }
-
-        resp = requests.post(
-            f"{self._host}/api/chat",
-            json=payload,
-            timeout=self._timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = await self._post("/api/chat", payload)
         return data.get("message", {}).get("content", "").strip()
 
     def add_tool_results(
@@ -412,25 +514,21 @@ class OllamaClient(BaseLLMClient):
         tool_results: list[dict],
     ) -> None:
         """Add tool results in Ollama/OpenAI format."""
-        # Add assistant message with tool calls
         assistant_msg = response.raw_assistant_message
         messages.append(assistant_msg)
 
-        # Add each tool result as a separate message
         for result in tool_results:
             messages.append({
                 "role": "tool",
                 "content": result["content"],
             })
 
-    def validate_connection(self, model: str) -> None:
+    async def async_validate_connection(self, model: str) -> None:
         """Validate Ollama is reachable and model is available."""
         try:
-            resp = requests.get(f"{self._host}/api/tags", timeout=10)
-            resp.raise_for_status()
-            models = [m["name"] for m in resp.json().get("models", [])]
+            data = await self._get("/api/tags")
+            models = [m["name"] for m in data.get("models", [])]
 
-            # Strip :latest tag for comparison
             model_base = model.split(":")[0]
             available = [m.split(":")[0] for m in models]
 
@@ -440,13 +538,125 @@ class OllamaClient(BaseLLMClient):
                     f"Available: {', '.join(models)}. "
                     f"Pull it with: ollama pull {model}"
                 )
-        except requests.ConnectionError:
+        except aiohttp.ClientConnectorError:
             raise ConnectionError(
                 f"Cannot connect to Ollama at {self._host}. "
                 "Make sure Ollama is running."
             )
-        except requests.RequestException as err:
+        except aiohttp.ClientError as err:
             raise ConnectionError(f"Ollama connection error: {err}") from err
+
+    async def async_fetch_models(self) -> dict[str, str]:
+        """Fetch installed models from Ollama. Returns {model_name: display_label}."""
+        try:
+            data = await self._get("/api/tags")
+            models = {}
+            for m in data.get("models", []):
+                name = m["name"]
+                detail = m.get("details", {})
+                param_size = detail.get("parameter_size", "")
+                if param_size:
+                    label = f"{name} ({param_size})"
+                else:
+                    size_gb = m.get("size", 0) / (1024**3)
+                    label = f"{name} ({size_gb:.1f} GB)" if size_gb > 0 else name
+                models[name] = label
+            return models
+        except Exception:
+            return {}
+
+    # ── Private HTTP helpers ──
+
+    async def _post(self, path: str, payload: dict, retries: int = 2) -> dict:
+        """POST to Ollama with retry on timeout."""
+        url = f"{self._host}{path}"
+        last_error: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                async with aiohttp.ClientSession(timeout=self._timeout) as session:
+                    async with session.post(url, json=payload) as resp:
+                        resp.raise_for_status()
+                        return await resp.json()
+            except TimeoutError as err:
+                last_error = err
+                if attempt < retries:
+                    _LOGGER.warning(
+                        "Ollama request timed out (attempt %d/%d), retrying...",
+                        attempt + 1, retries + 1,
+                    )
+                    continue
+            except aiohttp.ClientError as err:
+                last_error = err
+                break
+        raise ConnectionError(f"Ollama request failed: {last_error}") from last_error
+
+    async def _post_stream(self, path: str, payload: dict, retries: int = 1) -> dict:
+        """POST to Ollama with streaming, accumulating the full response.
+
+        Streaming gives better timeout behavior -- tokens arriving prove the
+        model is working, preventing premature timeout on slow generations.
+        """
+        url = f"{self._host}{path}"
+        payload = {**payload, "stream": True}
+        last_error: Exception | None = None
+
+        for attempt in range(retries + 1):
+            try:
+                accumulated_content = ""
+                accumulated_tool_calls: list[dict] = []
+                final_message: dict = {}
+
+                async with aiohttp.ClientSession(timeout=self._timeout) as session:
+                    async with session.post(url, json=payload) as resp:
+                        resp.raise_for_status()
+                        async for line in resp.content:
+                            line_str = line.strip()
+                            if not line_str:
+                                continue
+                            try:
+                                chunk = json.loads(line_str)
+                            except json.JSONDecodeError:
+                                continue
+
+                            message = chunk.get("message", {})
+                            accumulated_content += message.get("content", "")
+
+                            if message.get("tool_calls"):
+                                accumulated_tool_calls.extend(message["tool_calls"])
+
+                            if chunk.get("done"):
+                                final_message = message
+                                break
+
+                final_message["content"] = accumulated_content
+                if accumulated_tool_calls:
+                    final_message["tool_calls"] = accumulated_tool_calls
+
+                return {"message": final_message}
+
+            except TimeoutError as err:
+                last_error = err
+                if attempt < retries:
+                    _LOGGER.warning(
+                        "Ollama streaming timed out (attempt %d/%d), retrying...",
+                        attempt + 1, retries + 1,
+                    )
+                    continue
+            except aiohttp.ClientError as err:
+                last_error = err
+                break
+
+        raise ConnectionError(f"Ollama streaming request failed: {last_error}") from last_error
+
+    async def _get(self, path: str) -> dict:
+        """GET from Ollama."""
+        url = f"{self._host}{path}"
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as session:
+            async with session.get(url) as resp:
+                resp.raise_for_status()
+                return await resp.json()
 
 
 def create_llm_client(provider: str, **kwargs: Any) -> BaseLLMClient:
@@ -460,6 +670,8 @@ def create_llm_client(provider: str, **kwargs: Any) -> BaseLLMClient:
         return OllamaClient(
             host=kwargs.get("host", "http://localhost:11434"),
             timeout=kwargs.get("timeout", 120),
+            temperature=kwargs.get("temperature"),
+            top_p=kwargs.get("top_p"),
         )
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

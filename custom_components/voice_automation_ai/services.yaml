@@ -1,6 +1,6 @@
 create_automation:
   name: Create Automation
-  description: Generate a Home Assistant automation from a natural language description using Claude AI.
+  description: Generate a Home Assistant automation from a natural language description using AI.
   fields:
     description:
       name: Description
@@ -37,7 +37,7 @@ validate_automation:
 
 create_script:
   name: Create Script
-  description: Generate a Home Assistant script from a natural language description using Claude AI.
+  description: Generate a Home Assistant script from a natural language description using AI.
   fields:
     description:
       name: Description
@@ -56,7 +56,7 @@ create_script:
 
 create_scene:
   name: Create Scene
-  description: Generate a Home Assistant scene from a natural language description using Claude AI.
+  description: Generate a Home Assistant scene from a natural language description using AI.
   fields:
     description:
       name: Description
@@ -161,3 +161,91 @@ list_scripts:
 list_scenes:
   name: List Scenes
   description: List all scenes currently defined in scenes.yaml.
+
+create_blueprint:
+  name: Create Blueprint
+  description: Generate a Home Assistant blueprint from a natural language description using AI.
+  fields:
+    description:
+      name: Description
+      description: Natural language description of the blueprint you want to create.
+      required: true
+      example: "A blueprint for motion-activated lights with configurable entity, delay, and brightness"
+      selector:
+        text:
+    blueprint_name:
+      name: Blueprint Name
+      description: Filename for the blueprint (lowercase, underscores). Auto-generated if not provided.
+      required: false
+      example: "motion_activated_lights"
+      selector:
+        text:
+    blueprint_domain:
+      name: Domain
+      description: "Blueprint domain: automation or script."
+      default: "automation"
+      selector:
+        select:
+          options:
+            - "automation"
+            - "script"
+
+edit_blueprint:
+  name: Edit Blueprint
+  description: Modify an existing blueprint using a natural language description of the changes. Changes propagate to all automations/scripts using this blueprint.
+  fields:
+    blueprint_name:
+      name: Blueprint Name
+      description: The blueprint filename (without .yaml extension).
+      required: true
+      selector:
+        text:
+    description:
+      name: Changes
+      description: Natural language description of the changes to make.
+      required: true
+      selector:
+        text:
+    blueprint_domain:
+      name: Domain
+      description: "Blueprint domain: automation or script."
+      default: "automation"
+      selector:
+        select:
+          options:
+            - "automation"
+            - "script"
+
+delete_blueprint:
+  name: Delete Blueprint
+  description: Remove a blueprint file. Warning - automations/scripts using this blueprint will break.
+  fields:
+    blueprint_name:
+      name: Blueprint Name
+      description: The blueprint filename (without .yaml extension).
+      required: true
+      selector:
+        text:
+    blueprint_domain:
+      name: Domain
+      description: "Blueprint domain: automation or script."
+      default: "automation"
+      selector:
+        select:
+          options:
+            - "automation"
+            - "script"
+
+list_blueprints:
+  name: List Blueprints
+  description: List all blueprints for a given domain.
+  fields:
+    blueprint_domain:
+      name: Domain
+      description: "Blueprint domain: automation or script."
+      default: "automation"
+      selector:
+        select:
+          options:
+            - "automation"
+            - "script"

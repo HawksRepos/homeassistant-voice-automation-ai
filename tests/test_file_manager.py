@@ -424,10 +424,45 @@ class TestBlueprintSecurity:
         with pytest.raises(ValueError, match="Invalid blueprint name"):
             await file_manager.add_blueprint("automation", "../escape", "content")
 
-    async def test_slash_in_name_rejected(self, file_manager):
-        """Names containing slashes should be rejected."""
+    async def test_subfolder_in_name_accepted(self, file_manager):
+        """Source subfolders (the normal HA layout) are allowed and round-trip."""
+        content = "blueprint:\n  name: Motion\n  domain: automation\n"
+        rel = await file_manager.add_blueprint(
+            "automation", "homeassistant/motion_light", content
+        )
+        assert rel == "homeassistant/motion_light"
+
+        listed = await file_manager.read_blueprints("automation")
+        assert any(b["name"] == "homeassistant/motion_light" for b in listed)
+
+        raw = await file_manager.read_blueprint("automation", "homeassistant/motion_light")
+        assert "blueprint:" in raw
+
+        await file_manager.delete_blueprint("automation", "homeassistant/motion_light")
+        listed_after = await file_manager.read_blueprints("automation")
+        assert all(b["name"] != "homeassistant/motion_light" for b in listed_after)
+
+    async def test_recursive_listing_finds_nested(self, file_manager):
+        """A blueprint two folders deep must be discovered by the listing."""
+        content = "blueprint:\n  name: Deep\n  domain: automation\n"
+        await file_manager.add_blueprint("automation", "Author/pack/deep_bp", content)
+        listed = await file_manager.read_blueprints("automation")
+        assert any(b["name"] == "Author/pack/deep_bp" for b in listed)
+
+    async def test_backslash_traversal_rejected(self, file_manager):
+        """Backslash-based traversal must be rejected."""
         with pytest.raises(ValueError, match="Invalid blueprint name"):
-            await file_manager.add_blueprint("automation", "sub/dir/file", "content")
+            await file_manager.read_blueprint("automation", "..\\..\\secrets")
+
+    async def test_excessive_depth_rejected(self, file_manager):
+        """Paths deeper than the allowed limit must be rejected."""
+        with pytest.raises(ValueError, match="too deep"):
+            await file_manager.add_blueprint("automation", "a/b/c/d/e", "content")
+
+    async def test_special_characters_rejected(self, file_manager):
+        """Unsafe characters in a segment must be rejected."""
+        with pytest.raises(ValueError, match="Invalid blueprint name"):
+            await file_manager.read_blueprint("automation", "foo/bar;rm -rf")
 
     async def test_invalid_domain_rejected(self, file_manager):
         """Invalid blueprint domains should be rejected."""

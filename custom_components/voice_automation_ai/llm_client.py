@@ -19,6 +19,13 @@ TOOL_DEFINITIONS = [
         "parameters": {},
     },
     {
+        "name": "read_automation",
+        "description": "Read the full configuration of an existing automation by ID. Use this to view, summarize, or explain what an automation does before editing it.",
+        "parameters": {
+            "automation_id": {"type": "string", "description": "The automation ID (from list_automations).", "required": True},
+        },
+    },
+    {
         "name": "create_automation",
         "description": "Create a new Home Assistant automation.",
         "parameters": {
@@ -50,6 +57,13 @@ TOOL_DEFINITIONS = [
         "parameters": {},
     },
     {
+        "name": "read_script",
+        "description": "Read the full configuration of an existing script by name. Use this to view, summarize, or explain what a script does before editing it.",
+        "parameters": {
+            "script_name": {"type": "string", "description": "The script name (from list_scripts).", "required": True},
+        },
+    },
+    {
         "name": "create_script",
         "description": "Create a new Home Assistant script.",
         "parameters": {
@@ -76,6 +90,13 @@ TOOL_DEFINITIONS = [
         "name": "list_scenes",
         "description": "List all scenes defined in scenes.yaml.",
         "parameters": {},
+    },
+    {
+        "name": "read_scene",
+        "description": "Read the full configuration of an existing scene by ID. Use this to view, summarize, or explain what a scene does before editing it.",
+        "parameters": {
+            "scene_id": {"type": "string", "description": "The scene ID (from list_scenes).", "required": True},
+        },
     },
     {
         "name": "create_scene",
@@ -119,7 +140,7 @@ TOOL_DEFINITIONS = [
     # ── Blueprint tools ──
     {
         "name": "list_blueprints",
-        "description": "List all blueprints in the blueprints directory. Returns name, description, and domain for each.",
+        "description": "List all blueprints in the blueprints directory, including those in source subfolders. Returns each blueprint's identifier (e.g. 'homeassistant/motion_light' - pass this exact value as blueprint_name to read/edit/delete), description, and domain.",
         "parameters": {
             "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
         },
@@ -128,7 +149,7 @@ TOOL_DEFINITIONS = [
         "name": "read_blueprint",
         "description": "Read the full YAML content of a blueprint file. Use this before editing to see the current content.",
         "parameters": {
-            "blueprint_name": {"type": "string", "description": "The blueprint filename without .yaml extension.", "required": True},
+            "blueprint_name": {"type": "string", "description": "The blueprint identifier exactly as returned by list_blueprints, including its source subfolder (e.g. 'homeassistant/motion_light'). No .yaml extension.", "required": True},
             "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
         },
     },
@@ -136,7 +157,7 @@ TOOL_DEFINITIONS = [
         "name": "create_blueprint",
         "description": "Create a new blueprint file. The YAML must include a 'blueprint:' key with name, description, domain, and input definitions. Use !input tags for configurable parameters.",
         "parameters": {
-            "blueprint_name": {"type": "string", "description": "Filename for the blueprint (lowercase, underscores, no .yaml extension).", "required": True},
+            "blueprint_name": {"type": "string", "description": "Identifier for the new blueprint (letters, numbers, underscores, hyphens; no .yaml extension). Optionally include a source subfolder, e.g. 'voice_automation_ai/my_blueprint'.", "required": True},
             "yaml_content": {"type": "string", "description": "The complete blueprint YAML content including blueprint metadata, triggers, conditions, and actions.", "required": True},
             "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
         },
@@ -145,7 +166,7 @@ TOOL_DEFINITIONS = [
         "name": "edit_blueprint",
         "description": "Edit an existing blueprint by replacing its content. Changes propagate to ALL automations/scripts using this blueprint after reload.",
         "parameters": {
-            "blueprint_name": {"type": "string", "description": "The blueprint filename without .yaml extension.", "required": True},
+            "blueprint_name": {"type": "string", "description": "The blueprint identifier exactly as returned by list_blueprints, including its source subfolder (e.g. 'homeassistant/motion_light'). No .yaml extension.", "required": True},
             "yaml_content": {"type": "string", "description": "The complete updated blueprint YAML content.", "required": True},
             "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
         },
@@ -154,7 +175,7 @@ TOOL_DEFINITIONS = [
         "name": "delete_blueprint",
         "description": "Delete a blueprint file. Warning: automations/scripts using this blueprint will break.",
         "parameters": {
-            "blueprint_name": {"type": "string", "description": "The blueprint filename without .yaml extension.", "required": True},
+            "blueprint_name": {"type": "string", "description": "The blueprint identifier exactly as returned by list_blueprints, including its source subfolder (e.g. 'homeassistant/motion_light'). No .yaml extension.", "required": True},
             "domain": {"type": "string", "description": "Blueprint domain: 'automation' or 'script'. Defaults to 'automation'.", "required": False},
         },
     },

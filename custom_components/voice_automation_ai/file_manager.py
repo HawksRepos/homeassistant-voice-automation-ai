@@ -21,8 +21,13 @@ _LOGGER = logging.getLogger(__name__)
 # Pattern for valid HA entity IDs: domain.object_id (alphanumeric + underscores)
 _ENTITY_ID_PATTERN = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
 
-# Pattern for valid blueprint names: alphanumeric + underscores + hyphens
-_BLUEPRINT_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+# Pattern for a single blueprint path segment (folder or file name). Case is
+# preserved because Home Assistant stores blueprints under source subfolders
+# often named after a GitHub user (e.g. "Blackshome/sensor-light").
+_BLUEPRINT_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Maximum blueprint path depth (source subfolders + file name).
+_MAX_BLUEPRINT_DEPTH = 4
 
 # Valid blueprint domains (prevents directory traversal via domain parameter)
 _VALID_BLUEPRINT_DOMAINS = {"automation", "script"}
@@ -270,20 +275,36 @@ class HAConfigFileManager:
     # ── Blueprints (individual files in config/blueprints/<domain>/) ──
 
     @staticmethod
-    def _validate_blueprint_name(name: str) -> str:
-        """Validate and sanitize a blueprint name. Returns the clean name.
+    def _validate_blueprint_path(name: str) -> str:
+        """Validate a blueprint identifier and return a clean relative path.
 
-        Raises ValueError if the name is invalid or contains path traversal.
+        The identifier may include source subfolders (e.g.
+        ``homeassistant/motion_light``), exactly as returned by
+        :meth:`read_blueprints`. Case is preserved so existing on-disk
+        blueprints can be addressed. Each path segment must contain only
+        letters, numbers, underscores, and hyphens; ``..`` and absolute paths
+        are rejected. Callers additionally enforce a ``resolve()`` /
+        ``relative_to()`` containment check as defense-in-depth.
+
+        Raises ValueError if the identifier is invalid or attempts traversal.
         """
-        clean_name = name.lower().replace(" ", "_").replace("-", "_")
-        if not _BLUEPRINT_NAME_PATTERN.match(clean_name):
-            raise ValueError(
-                f"Invalid blueprint name: '{name}'. "
-                "Use lowercase letters, numbers, underscores, and hyphens."
-            )
-        if ".." in name or "/" in name or "\\" in name:
-            raise ValueError(f"Invalid blueprint name: '{name}'. Path components not allowed.")
-        return clean_name
+        raw = name.strip().replace("\\", "/")
+        if raw.lower().endswith(".yaml"):
+            raw = raw[:-len(".yaml")]
+        raw = raw.strip("/")
+        if not raw:
+            raise ValueError("Blueprint name cannot be empty.")
+
+        segments = [seg.replace(" ", "_") for seg in raw.split("/")]
+        if len(segments) > _MAX_BLUEPRINT_DEPTH:
+            raise ValueError(f"Invalid blueprint name: '{name}'. Path is too deep.")
+        for seg in segments:
+            if seg in ("", ".", "..") or not _BLUEPRINT_SEGMENT_PATTERN.match(seg):
+                raise ValueError(
+                    f"Invalid blueprint name: '{name}'. Use letters, numbers, "
+                    "underscores and hyphens; separate source subfolders with '/'."
+                )
+        return "/".join(segments)
 
     @staticmethod
     def _validate_blueprint_domain(domain: str) -> str:
@@ -358,14 +379,41 @@ class HAConfigFileManager:
         path.unlink()
 
     def _list_blueprint_files(self, domain: str) -> list[Path]:
-        """List all .yaml files in a blueprint directory (blocking)."""
+        """List all .yaml files under a blueprint directory, recursively (blocking).
+
+        Home Assistant stores blueprints in source subfolders
+        (``blueprints/<domain>/<source>/<name>.yaml``), so a non-recursive scan
+        finds nothing on a real install. ``rglob`` walks the subfolders.
+        """
         bp_dir = self._blueprint_dir(domain)
-        return sorted(bp_dir.glob("*.yaml"))
+        return sorted(bp_dir.rglob("*.yaml"))
+
+    def _blueprint_path(self, domain: str, name: str) -> Path:
+        """Validate a blueprint identifier and return its file path.
+
+        Returns ``<config>/blueprints/<domain>/<rel>.yaml`` and enforces a
+        containment check so the resolved path cannot escape the domain
+        directory. Raises ValueError on invalid names or traversal attempts.
+        """
+        rel = self._validate_blueprint_path(name)
+        bp_dir = self._blueprint_dir(domain)
+        path = bp_dir / f"{rel}.yaml"
+        try:
+            path.resolve().relative_to(bp_dir.resolve())
+        except ValueError as err:
+            raise ValueError(f"Invalid blueprint name: '{name}'.") from err
+        return path
 
     async def read_blueprints(self, domain: str = "automation") -> list[dict]:
-        """List all blueprints for a domain. Returns summary with name and description."""
+        """List all blueprints for a domain. Returns summary with name and description.
+
+        ``name`` is the blueprint's path relative to the domain directory
+        (e.g. ``homeassistant/motion_light``) - pass it back verbatim to
+        read/update/delete.
+        """
         self._validate_blueprint_domain(domain)
         async with self._locks["blueprints"]:
+            bp_dir = self._config_dir / "blueprints" / domain
             files = await self._hass.async_add_executor_job(
                 self._list_blueprint_files, domain
             )
@@ -374,66 +422,55 @@ class HAConfigFileManager:
                 metadata = await self._hass.async_add_executor_job(
                     self._read_blueprint_metadata, path
                 )
+                rel = path.relative_to(bp_dir).with_suffix("").as_posix()
                 blueprints.append({
-                    "name": path.stem,
+                    "name": rel,
                     "blueprint_name": metadata.get("name", path.stem),
                     "description": metadata.get("description", ""),
                     "domain": metadata.get("domain", domain),
                 })
-            return blueprints
+            return sorted(blueprints, key=lambda b: b["name"])
 
     async def read_blueprint(self, domain: str, name: str) -> str:
         """Read a single blueprint file as raw YAML text."""
-        clean_name = self._validate_blueprint_name(name)
         async with self._locks["blueprints"]:
-            bp_dir = self._blueprint_dir(domain)
-            path = bp_dir / f"{clean_name}.yaml"
-            # Defense-in-depth: verify path is within expected directory
-            path.resolve().relative_to(bp_dir.resolve())
+            path = self._blueprint_path(domain, name)
             return await self._hass.async_add_executor_job(self._read_raw_file, path)
 
     async def add_blueprint(self, domain: str, name: str, yaml_content: str) -> str:
-        """Create a new blueprint file. Returns the blueprint name."""
-        clean_name = self._validate_blueprint_name(name)
-
+        """Create a new blueprint file. Returns the blueprint identifier."""
         async with self._locks["blueprints"]:
-            bp_dir = self._blueprint_dir(domain)
-            path = bp_dir / f"{clean_name}.yaml"
+            path = self._blueprint_path(domain, name)
+            rel = self._validate_blueprint_path(name)
 
             if path.exists():
-                raise ValueError(f"Blueprint '{clean_name}' already exists in {domain}")
+                raise ValueError(f"Blueprint '{rel}' already exists in {domain}")
 
             await self._hass.async_add_executor_job(self._write_raw_file, path, yaml_content)
             await self._reload(domain)
-            _LOGGER.info("Blueprint added: %s/%s", domain, clean_name)
-            return clean_name
+            _LOGGER.info("Blueprint added: %s/%s", domain, rel)
+            return rel
 
     async def update_blueprint(self, domain: str, name: str, yaml_content: str) -> None:
         """Update an existing blueprint file."""
-        clean_name = self._validate_blueprint_name(name)
         async with self._locks["blueprints"]:
-            bp_dir = self._blueprint_dir(domain)
-            path = bp_dir / f"{clean_name}.yaml"
-            path.resolve().relative_to(bp_dir.resolve())
+            path = self._blueprint_path(domain, name)
+            rel = self._validate_blueprint_path(name)
 
             if not path.exists():
-                raise ValueError(f"Blueprint '{clean_name}' not found in {domain}")
+                raise ValueError(f"Blueprint '{rel}' not found in {domain}")
 
             await self._hass.async_add_executor_job(self._write_raw_file, path, yaml_content)
             await self._reload(domain)
-            _LOGGER.info("Blueprint updated: %s/%s", domain, clean_name)
+            _LOGGER.info("Blueprint updated: %s/%s", domain, rel)
 
     async def delete_blueprint(self, domain: str, name: str) -> None:
         """Delete a blueprint file."""
-        clean_name = self._validate_blueprint_name(name)
         async with self._locks["blueprints"]:
-            bp_dir = self._blueprint_dir(domain)
-            path = bp_dir / f"{clean_name}.yaml"
-            path.resolve().relative_to(bp_dir.resolve())
-
+            path = self._blueprint_path(domain, name)
             await self._hass.async_add_executor_job(self._delete_file, path)
             await self._reload(domain)
-            _LOGGER.info("Blueprint deleted: %s/%s", domain, clean_name)
+            _LOGGER.info("Blueprint deleted: %s/%s", domain, self._validate_blueprint_path(name))
 
     # ── Helpers ──
 

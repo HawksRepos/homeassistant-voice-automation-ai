@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-07
+
+### Added
+- **Read tools for automations, scripts, and scenes** — new `read_automation`, `read_script`, and `read_scene` tools let the assistant fetch the full configuration of an existing item. Previously it could only list names and had to guess (or "edit") to inspect contents; now it reads the real YAML before summarizing or editing.
+
+### Fixed
+- **Blueprints in source subfolders are now found** — Home Assistant stores blueprints under author subfolders (e.g. `blueprints/automation/homeassistant/motion_light.yaml`), but the listing only scanned the top level and so reported "no blueprints" on virtually every real install. Listing now recurses, and blueprints are addressed by their relative path (e.g. `homeassistant/motion_light`) for read/edit/delete. Path validation preserves case (author folders are often named after a GitHub user) while still rejecting `..`, backslashes, absolute paths, and excessive depth; `create_blueprint` may target an optional subfolder. The `add_blueprint` containment guard that was missing is now in place.
+
+### Changed
+- System prompt now instructs the model to use the read tools to inspect existing automations/scripts/scenes/blueprints instead of guessing.
+
 ## [0.5.0] - 2026-06-07
 
 ### Added

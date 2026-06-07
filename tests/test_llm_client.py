@@ -131,8 +131,12 @@ class TestLLMResponse:
 class TestToolDefinitions:
     """Tests for the unified TOOL_DEFINITIONS structure."""
 
-    def test_all_19_tools_defined(self):
-        assert len(TOOL_DEFINITIONS) == 19
+    def test_all_22_tools_defined(self):
+        assert len(TOOL_DEFINITIONS) == 22
+
+    def test_read_tools_defined(self):
+        names = {t["name"] for t in TOOL_DEFINITIONS}
+        assert {"read_automation", "read_script", "read_scene"} <= names
 
     def test_every_tool_has_required_keys(self):
         for tool in TOOL_DEFINITIONS:
@@ -187,7 +191,7 @@ class TestAnthropicToolConversion:
         client = AnthropicClient.__new__(AnthropicClient)
         tools = client._to_anthropic_tools()
 
-        assert len(tools) == 19
+        assert len(tools) == 22
         for tool in tools:
             assert "name" in tool
             assert "description" in tool
@@ -463,7 +467,7 @@ class TestOllamaToolConversion:
         client = OllamaClient.__new__(OllamaClient)
         tools = client._to_ollama_tools()
 
-        assert len(tools) == 19
+        assert len(tools) == 22
         for tool in tools:
             assert tool["type"] == "function"
             assert "function" in tool

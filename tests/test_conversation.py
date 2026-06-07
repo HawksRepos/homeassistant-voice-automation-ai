@@ -411,6 +411,52 @@ class TestToolExecutionCRUD:
         assert result["success"] is True
         assert result["count"] == 2
 
+    async def test_read_automation_returns_full_config(self, agent, file_manager_mock):
+        full = {
+            "id": "2",
+            "alias": "Night Mode",
+            "trigger": [{"platform": "state", "entity_id": "binary_sensor.x"}],
+            "action": [{"service": "light.turn_off", "entity_id": "light.bed"}],
+        }
+        file_manager_mock.read_automations = AsyncMock(
+            return_value=[{"id": "1", "alias": "Other"}, full]
+        )
+        result = await agent._execute_tool("read_automation", {"automation_id": "2"})
+        assert result["success"] is True
+        assert result["automation"] == full
+
+    async def test_read_automation_not_found(self, agent, file_manager_mock):
+        file_manager_mock.read_automations = AsyncMock(return_value=[{"id": "1"}])
+        result = await agent._execute_tool("read_automation", {"automation_id": "99"})
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    async def test_read_script_returns_body(self, agent, file_manager_mock):
+        body = {"alias": "Bedtime", "sequence": [{"service": "light.turn_off"}]}
+        file_manager_mock.read_scripts = AsyncMock(return_value={"bedtime": body})
+        result = await agent._execute_tool("read_script", {"script_name": "bedtime"})
+        assert result["success"] is True
+        assert result["script"] == body
+
+    async def test_read_script_not_found(self, agent, file_manager_mock):
+        file_manager_mock.read_scripts = AsyncMock(return_value={})
+        result = await agent._execute_tool("read_script", {"script_name": "missing"})
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    async def test_read_scene_returns_full_config(self, agent, file_manager_mock):
+        scene = {"id": "7", "name": "Movie", "entities": {"light.tv": "on"}}
+        file_manager_mock.read_scenes = AsyncMock(return_value=[scene])
+        result = await agent._execute_tool("read_scene", {"scene_id": "7"})
+        assert result["success"] is True
+        assert result["scene"] == scene
+
+    async def test_read_scene_not_found(self, agent, file_manager_mock):
+        file_manager_mock.read_scenes = AsyncMock(return_value=[])
+        result = await agent._execute_tool("read_scene", {"scene_id": "7"})
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
     async def test_create_automation_safe(self, agent, file_manager_mock):
         file_manager_mock.add_automation = AsyncMock(return_value="12345")
         yaml_content = yaml.dump(
@@ -804,6 +850,9 @@ class TestActionSummary:
             ("list_automations", {}),
             ("get_entity_state", {"entity_id": "light.x"}),
             ("read_blueprint", {"blueprint_name": "bp"}),
+            ("read_automation", {"automation_id": "1"}),
+            ("read_script", {"script_name": "s"}),
+            ("read_scene", {"scene_id": "7"}),
         ):
             assert VoiceAutomationAIConversationAgent._summarize_action(
                 name, inp, {"success": True}

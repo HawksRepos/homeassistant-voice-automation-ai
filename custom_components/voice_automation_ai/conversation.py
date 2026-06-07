@@ -77,6 +77,10 @@ configurable parameters.
 
 Guidelines:
 - Always use the tools to perform actions - never just describe what to do.
+- To view, summarize, or explain an existing automation, script, scene, or \
+blueprint, use the matching read tool (read_automation, read_script, \
+read_scene, read_blueprint) to fetch its real content. Never guess what an \
+existing item does.
 - For device control, use call_service with the correct domain and service.
 - For automations: YAML dict with alias, description, mode, trigger, condition, action.
 - For scripts: YAML dict with alias, description, mode, sequence.
@@ -284,6 +288,7 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
     _READ_ONLY_TOOLS = frozenset({
         "list_automations", "list_scripts", "list_scenes",
         "list_blueprints", "read_blueprint", "get_entity_state",
+        "read_automation", "read_script", "read_scene",
     })
 
     @staticmethod
@@ -412,6 +417,20 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 ]
                 return {"success": True, "count": len(summary), "automations": summary}
 
+            elif tool_name == "read_automation":
+                automations = await fm.read_automations()
+                automation = next(
+                    (a for a in automations
+                     if str(a.get("id")) == str(tool_input["automation_id"])),
+                    None,
+                )
+                if automation is None:
+                    return {
+                        "success": False,
+                        "error": f"Automation '{tool_input['automation_id']}' not found",
+                    }
+                return {"success": True, "automation": automation}
+
             elif tool_name == "create_automation":
                 data = yaml.safe_load(tool_input["yaml_content"])
                 if isinstance(data, list):
@@ -448,6 +467,20 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 ]
                 return {"success": True, "count": len(summary), "scripts": summary}
 
+            elif tool_name == "read_script":
+                scripts = await fm.read_scripts()
+                body = scripts.get(tool_input["script_name"])
+                if body is None:
+                    return {
+                        "success": False,
+                        "error": f"Script '{tool_input['script_name']}' not found",
+                    }
+                return {
+                    "success": True,
+                    "script_name": tool_input["script_name"],
+                    "script": body,
+                }
+
             elif tool_name == "create_script":
                 data = yaml.safe_load(tool_input["yaml_content"])
                 blocked = self._check_yaml_for_blocked_services(data)
@@ -475,6 +508,20 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                     for s in scenes
                 ]
                 return {"success": True, "count": len(summary), "scenes": summary}
+
+            elif tool_name == "read_scene":
+                scenes = await fm.read_scenes()
+                scene = next(
+                    (s for s in scenes
+                     if str(s.get("id")) == str(tool_input["scene_id"])),
+                    None,
+                )
+                if scene is None:
+                    return {
+                        "success": False,
+                        "error": f"Scene '{tool_input['scene_id']}' not found",
+                    }
+                return {"success": True, "scene": scene}
 
             elif tool_name == "create_scene":
                 data = yaml.safe_load(tool_input["yaml_content"])

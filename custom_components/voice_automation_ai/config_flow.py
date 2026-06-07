@@ -13,6 +13,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     ANTHROPIC_MODELS,
+    CONF_ALLOW_SENSITIVE_ACTIONS,
     CONF_API_KEY,
     CONF_LANGUAGE,
     CONF_MAX_HISTORY_TURNS,
@@ -22,6 +23,7 @@ from .const import (
     CONF_PROVIDER,
     CONF_TEMPERATURE,
     CONF_TOP_P,
+    DEFAULT_ALLOW_SENSITIVE_ACTIONS,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_HISTORY_TURNS,
     DEFAULT_MAX_TOKENS,
@@ -135,6 +137,8 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
+            except ModelNotFound:
+                errors["base"] = "model_not_found"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except Exception as err:
@@ -329,6 +333,9 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
         current_max_history = self._config_entry.options.get(
             CONF_MAX_HISTORY_TURNS, DEFAULT_MAX_HISTORY_TURNS
         )
+        current_allow_sensitive = self._config_entry.options.get(
+            CONF_ALLOW_SENSITIVE_ACTIONS, DEFAULT_ALLOW_SENSITIVE_ACTIONS
+        )
 
         # If current model is custom (not in list), add it so dropdown works
         if current_model not in model_options:
@@ -343,6 +350,9 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
             vol.Required(CONF_MAX_HISTORY_TURNS, default=current_max_history): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=50)
             ),
+            vol.Required(
+                CONF_ALLOW_SENSITIVE_ACTIONS, default=current_allow_sensitive
+            ): bool,
         }
 
         # Add Ollama-specific options

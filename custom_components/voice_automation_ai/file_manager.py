@@ -14,6 +14,8 @@ import yaml
 
 from homeassistant.core import HomeAssistant
 
+from .security import InputLoader
+
 _LOGGER = logging.getLogger(__name__)
 
 # Pattern for valid HA entity IDs: domain.object_id (alphanumeric + underscores)
@@ -306,24 +308,16 @@ class HAConfigFileManager:
     def _read_blueprint_metadata(self, path: Path) -> dict:
         """Read only the blueprint metadata from a file (blocking).
 
-        Uses a custom YAML loader that handles !input tags by treating
+        Uses the shared InputLoader, which handles !input tags by treating
         them as plain strings, so we can extract the blueprint: section
         without errors.
         """
         if not path.exists():
             return {}
 
-        class _InputLoader(yaml.SafeLoader):
-            pass
-
-        def _input_constructor(loader, node):
-            return f"!input {loader.construct_scalar(node)}"
-
-        _InputLoader.add_constructor("!input", _input_constructor)
-
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = yaml.load(f, Loader=_InputLoader)
+                data = yaml.load(f, Loader=InputLoader)
             if isinstance(data, dict) and "blueprint" in data:
                 return data["blueprint"]
         except yaml.YAMLError:

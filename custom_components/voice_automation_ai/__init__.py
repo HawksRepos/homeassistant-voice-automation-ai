@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
 
 import voluptuous as vol
 import yaml
@@ -24,7 +23,6 @@ from .const import (
     ATTR_SCRIPT_NAME,
     ATTR_VALIDATE_ONLY,
     ATTR_YAML_CONTENT,
-    BLOCKED_SERVICE_DOMAINS,
     CONF_API_KEY,
     CONF_LANGUAGE,
     CONF_MAX_HISTORY_TURNS,
@@ -65,6 +63,7 @@ from .const import (
 )
 from .file_manager import HAConfigFileManager
 from .llm_client import create_llm_client
+from .security import check_yaml_for_blocked_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,48 +158,10 @@ def _build_llm_client_kwargs(config: dict) -> dict:
 def _check_yaml_for_blocked_services(data: dict | list) -> str | None:
     """Scan parsed YAML for references to blocked service domains.
 
-    Recursively walks the data structure checking 'service' and 'action' keys,
-    including nested choose/parallel/if-then/repeat/sequence blocks.
-    Returns an error message if a blocked service is found, else None.
+    Thin wrapper around the shared implementation; kept module-level so existing
+    service handlers and tests have a stable entry point.
     """
-
-    def _check_value(value: Any) -> str | None:
-        """Recursively check a value for blocked service references."""
-        if isinstance(value, dict):
-            # Check 'service' and 'action' keys (HA supports both)
-            for key in ("service", "action"):
-                svc = value.get(key)
-                if isinstance(svc, str) and "." in svc:
-                    svc_domain = svc.split(".")[0]
-                    if svc_domain in BLOCKED_SERVICE_DOMAINS:
-                        return (
-                            f"Generated YAML references restricted "
-                            f"service domain '{svc_domain}'."
-                        )
-            # Recurse into nested action structures
-            for key in (
-                "action", "sequence", "then", "else", "default",
-                "choose", "parallel", "repeat",
-            ):
-                nested = value.get(key)
-                if nested is not None:
-                    result = _check_value(nested)
-                    if result:
-                        return result
-            # Check all other dict values
-            for v in value.values():
-                if isinstance(v, (dict, list)):
-                    result = _check_value(v)
-                    if result:
-                        return result
-        elif isinstance(value, list):
-            for item in value:
-                result = _check_value(item)
-                if result:
-                    return result
-        return None
-
-    return _check_value(data)
+    return check_yaml_for_blocked_services(data)
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:

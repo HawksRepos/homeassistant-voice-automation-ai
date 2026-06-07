@@ -24,7 +24,7 @@ PROVIDERS = {
 
 # Defaults
 DEFAULT_PROVIDER = PROVIDER_ANTHROPIC
-DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_LANGUAGE = "en"
@@ -34,18 +34,25 @@ CONF_MAX_TOKENS = "max_tokens"
 CONF_MAX_HISTORY_TURNS = "max_history_turns"
 CONF_TEMPERATURE = "temperature"
 CONF_TOP_P = "top_p"
+CONF_ALLOW_SENSITIVE_ACTIONS = "allow_sensitive_actions"
 
 # Defaults for options
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_MAX_HISTORY_TURNS = 10
+# Default True preserves prior behaviour on upgrade (locks/alarms were already
+# controllable). Security-conscious users can disable it in the options flow.
+DEFAULT_ALLOW_SENSITIVE_ACTIONS = True
 
-# Available Anthropic models
+# Available Anthropic models.
+# Keep current-generation models only; retired model IDs (e.g. claude-3-opus,
+# claude-3-5-sonnet) are removed because the API returns 404 for them. A user's
+# previously-saved model is re-added to the dropdown by the options flow, so
+# dropping an older entry here never strands an existing install.
 ANTHROPIC_MODELS = {
-    "claude-sonnet-4-5-20250929": "Claude Sonnet 4.5 (Recommended)",
-    "claude-opus-4-1-20250805": "Claude Opus 4.1 (Most powerful)",
-    "claude-haiku-4-5-20251001": "Claude Haiku 4.5 (Fastest & cheapest)",
-    "claude-3-5-sonnet-20241022": "Claude 3.5 Sonnet (Legacy)",
-    "claude-3-opus-20240229": "Claude 3 Opus (Legacy)",
+    "claude-opus-4-8": "Claude Opus 4.8 (Most capable)",
+    "claude-sonnet-4-6": "Claude Sonnet 4.6 (Recommended)",
+    "claude-haiku-4-5": "Claude Haiku 4.5 (Fastest & cheapest)",
+    "claude-sonnet-4-5-20250929": "Claude Sonnet 4.5 (Legacy)",
 }
 
 # Common Ollama models (user can also type a custom name)
@@ -133,6 +140,26 @@ ALLOWED_SERVICE_DOMAINS = {
     "humidifier",
     "remote",
     "alarm_control_panel",
+}
+
+# High-impact domains gated behind the "allow_sensitive_actions" option.
+# These remain in ALLOWED_SERVICE_DOMAINS (so they work when enabled) but can be
+# turned off so a voice command (or prompt-injected request) cannot unlock a door
+# or disarm an alarm. Must be a subset of ALLOWED_SERVICE_DOMAINS.
+SENSITIVE_SERVICE_DOMAINS = {
+    "lock",
+    "alarm_control_panel",
+}
+
+# Service-call data keys that broaden targeting beyond a single entity_id.
+# Stripped from call_service payloads so the LLM cannot turn a single-entity
+# request into an area/device/label-wide action.
+TARGET_BROADENING_KEYS = {
+    "area_id",
+    "device_id",
+    "label_id",
+    "floor_id",
+    "target",
 }
 
 # Domains that must NEVER be called (even if added to allowlist by mistake)

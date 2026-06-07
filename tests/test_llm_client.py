@@ -305,6 +305,154 @@ class TestAnthropicCreateMessage:
         assert result.tool_calls[0]["id"] == "tc_123"
 
 
+# ── Anthropic create_simple_message ──
+
+
+class TestAnthropicCreateSimpleMessage:
+    """Test Anthropic create_simple_message robustness."""
+
+    @patch("custom_components.voice_automation_ai.llm_client.anthropic")
+    def test_returns_text_block(self, mock_anthropic):
+        mock_client = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "  hello  "
+
+        mock_response = MagicMock()
+        mock_response.content = [text_block]
+        mock_client.messages.create.return_value = mock_response
+
+        client = AnthropicClient(api_key="sk-test")
+        result = client.create_simple_message("claude-sonnet-4-6", "hi", 100)
+        assert result == "hello"
+
+    @patch("custom_components.voice_automation_ai.llm_client.anthropic")
+    def test_skips_leading_thinking_block(self, mock_anthropic):
+        """A thinking block first must not crash (it has no .text)."""
+        mock_client = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+
+        thinking_block = MagicMock(spec=["type", "thinking"])
+        thinking_block.type = "thinking"
+        thinking_block.thinking = "pondering"
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "answer"
+
+        mock_response = MagicMock()
+        mock_response.content = [thinking_block, text_block]
+        mock_client.messages.create.return_value = mock_response
+
+        client = AnthropicClient(api_key="sk-test")
+        result = client.create_simple_message("claude-sonnet-4-6", "hi", 100)
+        assert result == "answer"
+
+    @patch("custom_components.voice_automation_ai.llm_client.anthropic")
+    def test_no_text_block_returns_empty(self, mock_anthropic):
+        mock_client = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+
+        thinking_block = MagicMock(spec=["type", "thinking"])
+        thinking_block.type = "thinking"
+
+        mock_response = MagicMock()
+        mock_response.content = [thinking_block]
+        mock_client.messages.create.return_value = mock_response
+
+        client = AnthropicClient(api_key="sk-test")
+        result = client.create_simple_message("claude-sonnet-4-6", "hi", 100)
+        assert result == ""
+
+
+# ── Anthropic validate_connection ──
+
+
+class TestAnthropicValidateConnection:
+    """Test the token-free connection/model validation."""
+
+    def _client(self):
+        client = AnthropicClient.__new__(AnthropicClient)
+        client._client = MagicMock()
+        client._timeout = 30
+        return client
+
+    def test_uses_models_retrieve_not_messages(self):
+        client = self._client()
+        client.validate_connection("claude-sonnet-4-6")
+        client._client.models.retrieve.assert_called_once_with("claude-sonnet-4-6")
+        # Must NOT spend tokens on a messages.create call.
+        client._client.messages.create.assert_not_called()
+
+    def test_auth_error_propagates(self):
+        import anthropic
+        import httpx
+
+        client = self._client()
+        resp = httpx.Response(401, request=httpx.Request("GET", "https://api.anthropic.com"))
+        client._client.models.retrieve.side_effect = anthropic.AuthenticationError(
+            "bad key", response=resp, body=None
+        )
+        with pytest.raises(anthropic.AuthenticationError):
+            client.validate_connection("claude-sonnet-4-6")
+
+    def test_not_found_becomes_value_error(self):
+        import anthropic
+        import httpx
+
+        client = self._client()
+        resp = httpx.Response(404, request=httpx.Request("GET", "https://api.anthropic.com"))
+        client._client.models.retrieve.side_effect = anthropic.NotFoundError(
+            "no model", response=resp, body=None
+        )
+        with pytest.raises(ValueError, match="not found"):
+            client.validate_connection("nonexistent-model")
+
+    def test_other_error_becomes_connection_error(self):
+        client = self._client()
+        client._client.models.retrieve.side_effect = RuntimeError("network down")
+        with pytest.raises(ConnectionError, match="Failed to connect"):
+            client.validate_connection("claude-sonnet-4-6")
+
+
+# ── Anthropic prompt caching ──
+
+
+class TestAnthropicPromptCaching:
+    """Test that create_message sends a cacheable system prefix."""
+
+    @patch("custom_components.voice_automation_ai.llm_client.anthropic")
+    def test_system_block_has_cache_control(self, mock_anthropic):
+        mock_client = MagicMock()
+        mock_anthropic.Anthropic.return_value = mock_client
+
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = "ok"
+        mock_response = MagicMock()
+        mock_response.content = [text_block]
+        mock_client.messages.create.return_value = mock_response
+
+        client = AnthropicClient(api_key="sk-test")
+        client.create_message(
+            model="claude-sonnet-4-6",
+            system_prompt="SYS",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=100,
+            tools=True,
+        )
+
+        kwargs = mock_client.messages.create.call_args.kwargs
+        system = kwargs["system"]
+        assert isinstance(system, list)
+        assert system[0]["text"] == "SYS"
+        assert system[0]["cache_control"] == {"type": "ephemeral"}
+        # Tools render before system, so the single breakpoint caches both.
+        assert "tools" in kwargs
+
+
 # ── Ollama tool conversion ──
 
 

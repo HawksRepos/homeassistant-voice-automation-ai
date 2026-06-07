@@ -175,6 +175,20 @@ class TestConfigFlowAnthropicStep:
 
             assert result["errors"]["base"] == "cannot_connect"
 
+    async def test_shows_error_on_model_not_found(self, hass):
+        flow = VoiceAutomationAIConfigFlow()
+        flow.hass = hass
+
+        with patch(
+            "custom_components.voice_automation_ai.config_flow.validate_connection",
+            side_effect=ModelNotFound("model gone"),
+        ):
+            result = await flow.async_step_anthropic(
+                {CONF_API_KEY: "sk-ant-valid", CONF_MODEL: DEFAULT_MODEL}
+            )
+
+            assert result["errors"]["base"] == "model_not_found"
+
     async def test_language_auto_detection(self, hass):
         """When HA language is in LANGUAGES, it should be auto-detected."""
         flow = VoiceAutomationAIConfigFlow()
@@ -315,6 +329,18 @@ class TestOptionsFlow:
         flow.hass = hass
         result = await flow.async_step_init(user_input=None)
         assert result["step_id"] == "init"
+
+    async def test_form_includes_allow_sensitive_actions(self, hass):
+        """The sensitive-actions toggle must be present in the options form."""
+        entry = MagicMock()
+        entry.data = {CONF_PROVIDER: PROVIDER_ANTHROPIC}
+        entry.options = {}
+
+        flow = VoiceAutomationAIOptionsFlow(entry)
+        flow.hass = hass
+        result = await flow.async_step_init(user_input=None)
+        keys = {str(k) for k in result["data_schema"].schema}
+        assert "allow_sensitive_actions" in keys
 
     async def test_saves_input_after_successful_validation(self, hass):
         entry = MagicMock()

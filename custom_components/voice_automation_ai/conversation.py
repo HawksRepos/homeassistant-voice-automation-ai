@@ -9,19 +9,6 @@ from typing import Any
 
 import yaml
 
-
-class _InputLoader(yaml.SafeLoader):
-    """YAML loader that handles !input tags as plain strings."""
-
-    pass
-
-
-def _input_constructor(loader, node):
-    return f"!input {loader.construct_scalar(node)}"
-
-
-_InputLoader.add_constructor("!input", _input_constructor)
-
 from homeassistant.components.conversation import (
     ConversationEntity,
     ConversationInput,
@@ -36,6 +23,7 @@ from .const import (
     ALLOWED_SERVICE_DOMAINS,
     API_TIMEOUT,
     BLOCKED_SERVICE_DOMAINS,
+    CONF_ALLOW_SENSITIVE_ACTIONS,
     CONF_API_KEY,
     CONF_LANGUAGE,
     CONF_MAX_HISTORY_TURNS,
@@ -45,6 +33,7 @@ from .const import (
     CONF_PROVIDER,
     CONF_TEMPERATURE,
     CONF_TOP_P,
+    DEFAULT_ALLOW_SENSITIVE_ACTIONS,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_HISTORY_TURNS,
     DEFAULT_MAX_TOKENS,
@@ -56,9 +45,12 @@ from .const import (
     PROVIDER_ANTHROPIC,
     PROVIDER_OLLAMA,
     SENSITIVE_ATTRIBUTE_KEYS,
+    SENSITIVE_SERVICE_DOMAINS,
+    TARGET_BROADENING_KEYS,
 )
 from .file_manager import HAConfigFileManager
 from .llm_client import BaseLLMClient, create_llm_client
+from .security import InputLoader, check_yaml_for_blocked_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -125,6 +117,11 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         self._attr_unique_id = f"{config_entry.entry_id}_conversation"
         # Conversation history keyed by conversation_id
         self._conversations: OrderedDict[str, list[dict]] = OrderedDict()
+        # Cached LLM client, reused across turns so we don't rebuild the
+        # underlying HTTP connection pool every request. Rebuilt only when the
+        # connection-relevant config changes (keyed by _client_key).
+        self._client: BaseLLMClient | None = None
+        self._client_key: tuple | None = None
 
     @property
     def supported_languages(self) -> str:
@@ -142,24 +139,40 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         return self.hass.data[DOMAIN]["file_manager"]
 
     def _create_llm_client(self) -> BaseLLMClient:
-        """Create an LLM client from the current config."""
+        """Return an LLM client for the current config, reusing a cached one.
+
+        The client is rebuilt only when a connection-relevant setting changes,
+        so the underlying HTTP connection pool is reused across conversation
+        turns instead of being recreated every request.
+        """
         config = self._config
         provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
 
         if provider == PROVIDER_ANTHROPIC:
-            return create_llm_client(
-                provider,
-                api_key=config[CONF_API_KEY],
-                timeout=API_TIMEOUT,
-            )
+            key = (provider, config.get(CONF_API_KEY))
+            kwargs = {
+                "api_key": config[CONF_API_KEY],
+                "timeout": API_TIMEOUT,
+            }
         else:
-            return create_llm_client(
+            key = (
                 provider,
-                host=config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
-                timeout=OLLAMA_TIMEOUT,
-                temperature=config.get(CONF_TEMPERATURE),
-                top_p=config.get(CONF_TOP_P),
+                config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+                config.get(CONF_TEMPERATURE),
+                config.get(CONF_TOP_P),
             )
+            kwargs = {
+                "host": config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST),
+                "timeout": OLLAMA_TIMEOUT,
+                "temperature": config.get(CONF_TEMPERATURE),
+                "top_p": config.get(CONF_TOP_P),
+            }
+
+        if self._client is None or self._client_key != key:
+            self._client = create_llm_client(provider, **kwargs)
+            self._client_key = key
+
+        return self._client
 
     async def async_process(
         self,
@@ -191,21 +204,22 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         messages = list(history)
         messages.append({"role": "user", "content": user_input.text})
 
+        # Collect short descriptions of state-changing actions taken this turn,
+        # so the stored history gives later turns context for follow-ups like
+        # "undo that" or "what did you just change?".
+        actions: list[str] = []
+
         try:
             client = self._create_llm_client()
             response_text = await self._call_with_tools(
-                client, model, system_prompt, messages, max_tokens
+                client, model, system_prompt, messages, max_tokens, actions
             )
         except ConnectionError as err:
             provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
             if provider == PROVIDER_OLLAMA:
                 host = config.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
                 _LOGGER.error("Ollama connection error (host: %s): %s", host, err)
-                response_text = (
-                    f"Sorry, I could not reach Ollama at {host}. "
-                    "Please check that Ollama is running and accessible "
-                    "from Home Assistant."
-                )
+                response_text = f"Ollama error: {err}"
             else:
                 _LOGGER.error("Anthropic API connection error: %s", err)
                 response_text = (
@@ -234,9 +248,18 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 "Check the Home Assistant logs for details."
             )
 
-        # Only store clean user/assistant text in history (no tool exchanges)
+        # Only store clean user/assistant text in history (no tool exchanges).
+        # The spoken reply is response_text; the stored assistant turn may carry
+        # an extra action note so later turns know what was changed. The note is
+        # plain text (no tool_use/tool_result blocks), so it can't orphan after
+        # trimming, and it is never spoken back to the user.
+        stored_reply = response_text
+        if actions:
+            stored_reply = (
+                f"{response_text}\n\n[Actions taken this turn: {'; '.join(actions)}]"
+            )
         history.append({"role": "user", "content": user_input.text})
-        history.append({"role": "assistant", "content": response_text})
+        history.append({"role": "assistant", "content": stored_reply})
 
         # Trim history to keep token usage bounded
         if len(history) > max_history_turns * 2:
@@ -256,6 +279,59 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
             response=intent_response,
         )
 
+    # Read-only tools - excluded from the per-turn action summary because they
+    # don't change state.
+    _READ_ONLY_TOOLS = frozenset({
+        "list_automations", "list_scripts", "list_scenes",
+        "list_blueprints", "read_blueprint", "get_entity_state",
+    })
+
+    @staticmethod
+    def _summarize_action(
+        tool_name: str, tool_input: dict, result: dict
+    ) -> str | None:
+        """Return a one-line description of a successful state-changing action.
+
+        Returns None for read-only tools (nothing changed) and for anything not
+        worth recording. Used to give later conversation turns context.
+        """
+        if tool_name in VoiceAutomationAIConversationAgent._READ_ONLY_TOOLS:
+            return None
+        if tool_name == "call_service":
+            return (
+                f"called {tool_input.get('domain')}.{tool_input.get('service')} "
+                f"on {tool_input.get('entity_id')}"
+            )
+        if tool_name == "create_automation":
+            return (
+                f"created automation '{result.get('alias', '?')}' "
+                f"(id {result.get('automation_id', '?')})"
+            )
+        if tool_name == "edit_automation":
+            return f"edited automation {result.get('automation_id', '?')}"
+        if tool_name == "delete_automation":
+            return f"deleted automation {result.get('automation_id', '?')}"
+        if tool_name == "create_script":
+            return f"created script '{result.get('script_name', '?')}'"
+        if tool_name == "edit_script":
+            return f"edited script '{result.get('script_name', '?')}'"
+        if tool_name == "delete_script":
+            return f"deleted script '{result.get('script_name', '?')}'"
+        if tool_name == "create_scene":
+            return (
+                f"created scene '{result.get('name', '?')}' "
+                f"(id {result.get('scene_id', '?')})"
+            )
+        if tool_name == "edit_scene":
+            return f"edited scene {result.get('scene_id', '?')}"
+        if tool_name == "delete_scene":
+            return f"deleted scene {result.get('scene_id', '?')}"
+        if tool_name in ("create_blueprint", "edit_blueprint", "delete_blueprint"):
+            verb = tool_name.split("_")[0]
+            return f"{verb}d blueprint '{result.get('blueprint_name', '?')}'"
+        # Fallback for any future state-changing tool.
+        return tool_name.replace("_", " ")
+
     async def _call_with_tools(
         self,
         client: BaseLLMClient,
@@ -263,8 +339,13 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         system_prompt: str,
         messages: list[dict],
         max_tokens: int,
+        actions_out: list[str] | None = None,
     ) -> str:
-        """Call LLM with tool-use support, handling tool calls in a loop."""
+        """Call LLM with tool-use support, handling tool calls in a loop.
+
+        If ``actions_out`` is provided, a short description of each successful
+        state-changing tool call is appended to it.
+        """
 
         async def _do_create_message(msgs: list[dict]) -> Any:
             if client.is_async:
@@ -288,6 +369,16 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 tool_results = []
                 for tc in response.tool_calls:
                     result = await self._execute_tool(tc["name"], tc["arguments"])
+                    if (
+                        actions_out is not None
+                        and isinstance(result, dict)
+                        and result.get("success")
+                    ):
+                        summary = self._summarize_action(
+                            tc["name"], tc["arguments"], result
+                        )
+                        if summary:
+                            actions_out.append(summary)
                     tool_results.append({
                         "tool_call_id": tc["id"],
                         "content": json.dumps(result, default=str),
@@ -303,44 +394,10 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
     def _check_yaml_for_blocked_services(data: dict | list) -> str | None:
         """Scan parsed YAML for references to blocked service domains.
 
-        Recursively walks the data structure checking 'service' and 'action' keys,
-        including nested choose/parallel/if-then/repeat/sequence blocks.
-        Returns an error message if a blocked service is found, else None.
+        Thin wrapper around the shared implementation; kept as a static method
+        so existing callers and tests have a stable entry point.
         """
-
-        def _check_value(value) -> str | None:
-            if isinstance(value, dict):
-                for key in ("service", "action"):
-                    svc = value.get(key)
-                    if isinstance(svc, str) and "." in svc:
-                        svc_domain = svc.split(".")[0]
-                        if svc_domain in BLOCKED_SERVICE_DOMAINS:
-                            return (
-                                f"Blocked: generated YAML references restricted "
-                                f"service domain '{svc_domain}'."
-                            )
-                for key in (
-                    "action", "sequence", "then", "else", "default",
-                    "choose", "parallel", "repeat",
-                ):
-                    nested = value.get(key)
-                    if nested is not None:
-                        result = _check_value(nested)
-                        if result:
-                            return result
-                for v in value.values():
-                    if isinstance(v, (dict, list)):
-                        result = _check_value(v)
-                        if result:
-                            return result
-            elif isinstance(value, list):
-                for item in value:
-                    result = _check_value(item)
-                    if result:
-                        return result
-            return None
-
-        return _check_value(data)
+        return check_yaml_for_blocked_services(data)
 
     async def _execute_tool(self, tool_name: str, tool_input: dict) -> dict:
         """Execute a tool call and return the result."""
@@ -467,9 +524,45 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                         ),
                     }
 
+                # Security: gate high-impact domains (locks, alarms) behind a
+                # config option so they can't be triggered by voice unless the
+                # user has explicitly opted in.
+                if domain in SENSITIVE_SERVICE_DOMAINS and not self._config.get(
+                    CONF_ALLOW_SENSITIVE_ACTIONS, DEFAULT_ALLOW_SENSITIVE_ACTIONS
+                ):
+                    _LOGGER.warning(
+                        "Blocked sensitive action (disabled in options): %s.%s",
+                        domain, service,
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Actions on '{domain}' are disabled. Enable "
+                            "'Allow sensitive actions' in the integration options "
+                            "to control locks and alarms."
+                        ),
+                    }
+
                 service_data = {}
                 if "service_data" in tool_input and tool_input["service_data"]:
                     service_data = json.loads(tool_input["service_data"])
+                    if not isinstance(service_data, dict):
+                        return {
+                            "success": False,
+                            "error": "service_data must be a JSON object.",
+                        }
+                    # Security: drop keys that broaden targeting beyond the named
+                    # entity, so a single-entity request can't be turned into an
+                    # area/device/label/floor-wide action.
+                    broadening = TARGET_BROADENING_KEYS & service_data.keys()
+                    if broadening:
+                        _LOGGER.warning(
+                            "Stripped target-broadening keys from %s.%s: %s",
+                            domain, service, sorted(broadening),
+                        )
+                        for k in broadening:
+                            service_data.pop(k, None)
+                # Force targeting to the single requested entity.
                 service_data["entity_id"] = entity_id
 
                 await self.hass.services.async_call(
@@ -516,7 +609,7 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 yaml_content = tool_input["yaml_content"]
                 # Security: check for blocked services using !input-aware loader
                 try:
-                    data = yaml.load(yaml_content, Loader=_InputLoader)
+                    data = yaml.load(yaml_content, Loader=InputLoader)
                     if data:
                         blocked = self._check_yaml_for_blocked_services(data)
                         if blocked:
@@ -531,7 +624,7 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 bp_domain = tool_input.get("domain", "automation")
                 yaml_content = tool_input["yaml_content"]
                 try:
-                    data = yaml.load(yaml_content, Loader=_InputLoader)
+                    data = yaml.load(yaml_content, Loader=InputLoader)
                     if data:
                         blocked = self._check_yaml_for_blocked_services(data)
                         if blocked:

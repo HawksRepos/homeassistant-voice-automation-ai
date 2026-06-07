@@ -121,6 +121,146 @@ class TestCallServiceSecurity:
         assert result["success"] is False
         assert "Invalid JSON" in result["error"]
 
+    async def test_non_object_service_data_rejected(self, agent):
+        """service_data that isn't a JSON object must be rejected."""
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {
+                "domain": "light",
+                "service": "turn_on",
+                "entity_id": "light.test",
+                "service_data": '"just a string"',
+            },
+        )
+        assert result["success"] is False
+        assert "JSON object" in result["error"]
+        agent.hass.services.async_call.assert_not_called()
+
+    async def test_target_broadening_keys_stripped(self, agent):
+        """area_id/device_id/etc must not survive into the service call."""
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {
+                "domain": "light",
+                "service": "turn_off",
+                "entity_id": "light.living_room",
+                "service_data": json.dumps({
+                    "area_id": "everywhere",
+                    "device_id": "dev1",
+                    "label_id": "lbl",
+                    "floor_id": "ground",
+                    "target": {"area_id": "all"},
+                    "transition": 2,
+                }),
+            },
+        )
+        assert result["success"] is True
+        sent = agent.hass.services.async_call.call_args[0][2]
+        for key in ("area_id", "device_id", "label_id", "floor_id", "target"):
+            assert key not in sent, f"broadening key '{key}' leaked through"
+        # Legitimate data is preserved and targeting is forced to the entity.
+        assert sent["transition"] == 2
+        assert sent["entity_id"] == "light.living_room"
+
+
+# ── Security: sensitive-domain gating ──
+
+
+class TestSensitiveActionGating:
+    """Test the allow_sensitive_actions option gates locks/alarms."""
+
+    async def test_lock_blocked_when_disabled(self, agent):
+        agent.hass.data[DOMAIN][agent._config_entry.entry_id][
+            "allow_sensitive_actions"
+        ] = False
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+        )
+        assert result["success"] is False
+        assert "disabled" in result["error"].lower()
+        agent.hass.services.async_call.assert_not_called()
+
+    async def test_alarm_blocked_when_disabled(self, agent):
+        agent.hass.data[DOMAIN][agent._config_entry.entry_id][
+            "allow_sensitive_actions"
+        ] = False
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {
+                "domain": "alarm_control_panel",
+                "service": "alarm_disarm",
+                "entity_id": "alarm_control_panel.home",
+            },
+        )
+        assert result["success"] is False
+        agent.hass.services.async_call.assert_not_called()
+
+    async def test_lock_allowed_when_enabled(self, agent):
+        agent.hass.data[DOMAIN][agent._config_entry.entry_id][
+            "allow_sensitive_actions"
+        ] = True
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+        )
+        assert result["success"] is True
+        agent.hass.services.async_call.assert_awaited_once()
+
+    async def test_default_allows_sensitive(self, agent):
+        """With no option set, behaviour matches the pre-upgrade default (on)."""
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {"domain": "lock", "service": "lock", "entity_id": "lock.back_door"},
+        )
+        assert result["success"] is True
+
+    async def test_non_sensitive_unaffected_when_disabled(self, agent):
+        agent.hass.data[DOMAIN][agent._config_entry.entry_id][
+            "allow_sensitive_actions"
+        ] = False
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {"domain": "light", "service": "turn_on", "entity_id": "light.kitchen"},
+        )
+        assert result["success"] is True
+
+
+# ── LLM client reuse ──
+
+
+class TestClientReuse:
+    """Test that the LLM client is cached and rebuilt only on config change."""
+
+    def test_client_reused_across_calls(self, agent):
+        with patch(
+            "custom_components.voice_automation_ai.conversation.create_llm_client",
+            return_value=MagicMock(),
+        ) as mock_create:
+            first = agent._create_llm_client()
+            second = agent._create_llm_client()
+        assert first is second
+        assert mock_create.call_count == 1
+
+    def test_client_rebuilt_on_config_change(self, agent):
+        with patch(
+            "custom_components.voice_automation_ai.conversation.create_llm_client",
+            side_effect=lambda *a, **k: MagicMock(),
+        ) as mock_create:
+            first = agent._create_llm_client()
+            # Change the api key -> cache key changes -> rebuild.
+            agent.hass.data[DOMAIN][agent._config_entry.entry_id]["api_key"] = "sk-new"
+            second = agent._create_llm_client()
+        assert first is not second
+        assert mock_create.call_count == 2
+
 
 # ── Security: get_entity_state sensitive attribute stripping ──
 
@@ -651,6 +791,140 @@ class TestCallWithTools:
             mock_client, "model", "system", [{"role": "user", "content": "hi"}], 100
         )
         assert result == "Done."
+
+
+# ── Action summary in history ──
+
+
+class TestActionSummary:
+    """Test cross-turn recording of state-changing actions."""
+
+    def test_summarize_read_only_is_none(self):
+        for name, inp in (
+            ("list_automations", {}),
+            ("get_entity_state", {"entity_id": "light.x"}),
+            ("read_blueprint", {"blueprint_name": "bp"}),
+        ):
+            assert VoiceAutomationAIConversationAgent._summarize_action(
+                name, inp, {"success": True}
+            ) is None
+
+    def test_summarize_call_service(self):
+        s = VoiceAutomationAIConversationAgent._summarize_action(
+            "call_service",
+            {"domain": "light", "service": "turn_on", "entity_id": "light.kitchen"},
+            {"success": True},
+        )
+        assert s == "called light.turn_on on light.kitchen"
+
+    def test_summarize_create_automation(self):
+        s = VoiceAutomationAIConversationAgent._summarize_action(
+            "create_automation",
+            {},
+            {"success": True, "alias": "Morning", "automation_id": "123"},
+        )
+        assert "created automation 'Morning'" in s
+        assert "123" in s
+
+    def test_summarize_blueprint_verbs(self):
+        assert (
+            VoiceAutomationAIConversationAgent._summarize_action(
+                "create_blueprint", {}, {"blueprint_name": "bp"}
+            )
+            == "created blueprint 'bp'"
+        )
+        assert (
+            VoiceAutomationAIConversationAgent._summarize_action(
+                "delete_blueprint", {}, {"blueprint_name": "bp"}
+            )
+            == "deleted blueprint 'bp'"
+        )
+
+    async def test_call_with_tools_records_mutating_action(self, agent):
+        from custom_components.voice_automation_ai.llm_client import LLMResponse
+
+        agent.hass.services.async_call = AsyncMock()
+        responses = [
+            LLMResponse(
+                tool_calls=[{
+                    "id": "tc1", "name": "call_service",
+                    "arguments": {
+                        "domain": "light", "service": "turn_on",
+                        "entity_id": "light.kitchen",
+                    },
+                }],
+                raw_assistant_message=[{
+                    "type": "tool_use", "id": "tc1",
+                    "name": "call_service", "input": {},
+                }],
+            ),
+            LLMResponse(text="Done"),
+        ]
+        mock_client = MagicMock()
+        mock_client.is_async = False
+        mock_client.create_message.side_effect = responses
+        mock_client.add_tool_results = MagicMock()
+
+        actions: list[str] = []
+        result = await agent._call_with_tools(
+            mock_client, "m", "s", [{"role": "user", "content": "x"}], 100, actions
+        )
+        assert result == "Done"
+        assert actions == ["called light.turn_on on light.kitchen"]
+
+    async def test_call_with_tools_skips_read_only(self, agent, file_manager_mock):
+        from custom_components.voice_automation_ai.llm_client import LLMResponse
+
+        file_manager_mock.read_automations = AsyncMock(return_value=[])
+        responses = [
+            LLMResponse(
+                tool_calls=[{"id": "tc1", "name": "list_automations", "arguments": {}}],
+                raw_assistant_message=[{
+                    "type": "tool_use", "id": "tc1",
+                    "name": "list_automations", "input": {},
+                }],
+            ),
+            LLMResponse(text="No automations."),
+        ]
+        mock_client = MagicMock()
+        mock_client.is_async = False
+        mock_client.create_message.side_effect = responses
+        mock_client.add_tool_results = MagicMock()
+
+        actions: list[str] = []
+        await agent._call_with_tools(
+            mock_client, "m", "s", [{"role": "user", "content": "x"}], 100, actions
+        )
+        assert actions == []
+
+    async def test_async_process_appends_action_note(self, agent):
+        async def fake_call(*args):
+            # args[5] is the actions accumulator passed by async_process.
+            args[5].append("called light.turn_on on light.kitchen")
+            return "Okay"
+
+        with patch.object(agent, "_call_with_tools", side_effect=fake_call):
+            user_input = MagicMock()
+            user_input.text = "turn on the kitchen light"
+            user_input.conversation_id = "c1"
+            await agent.async_process(user_input)
+
+        stored = agent._conversations["c1"][-1]["content"]
+        assert stored.startswith("Okay")
+        assert (
+            "[Actions taken this turn: called light.turn_on on light.kitchen]"
+            in stored
+        )
+
+    async def test_async_process_no_note_without_actions(self, agent):
+        with patch.object(agent, "_call_with_tools", return_value="Just chatting"):
+            user_input = MagicMock()
+            user_input.text = "hello"
+            user_input.conversation_id = "c2"
+            await agent.async_process(user_input)
+
+        stored = agent._conversations["c2"][-1]["content"]
+        assert stored == "Just chatting"
 
 
 # ── Regression: tool exchanges must not pollute stored history ──

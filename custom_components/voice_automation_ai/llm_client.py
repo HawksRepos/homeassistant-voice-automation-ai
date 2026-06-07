@@ -291,10 +291,22 @@ class AnthropicClient(BaseLLMClient):
         tools: bool = True,
     ) -> LLMResponse:
         """Send a message to Claude."""
+        # Send the system prompt as a cacheable block. Render order is
+        # tools -> system -> messages, so a cache breakpoint on the system block
+        # caches the tool definitions and system prompt together. The prefix is
+        # stable across tool-use rounds within a turn and across turns until the
+        # entity list changes, so rounds 2-5 and follow-up turns read from cache
+        # (~90% cheaper) instead of re-billing the full prefix.
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system_prompt,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": messages,
         }
         if tools:
@@ -338,7 +350,14 @@ class AnthropicClient(BaseLLMClient):
             messages=[{"role": "user", "content": prompt}],
             timeout=self._timeout,
         )
-        return response.content[0].text.strip()
+        # Find the first text block rather than assuming content[0] is text -
+        # a thinking-enabled model can emit a thinking block first, which has
+        # no .text attribute and would raise.
+        text = next(
+            (block.text for block in response.content if block.type == "text"),
+            "",
+        )
+        return text.strip()
 
     def add_tool_results(
         self,
@@ -361,15 +380,21 @@ class AnthropicClient(BaseLLMClient):
         })
 
     def validate_connection(self, model: str) -> None:
-        """Validate API key by making a minimal request."""
+        """Validate the API key and model without spending tokens.
+
+        Uses models.retrieve - a free metadata lookup - instead of a billed
+        messages.create call. This still validates the API key (401 ->
+        AuthenticationError) and that the model exists and is accessible to this
+        key (404 -> NotFoundError), but at no token cost and on every options save.
+        """
         try:
-            self._client.messages.create(
-                model=model,
-                max_tokens=10,
-                messages=[{"role": "user", "content": "test"}],
-            )
+            self._client.models.retrieve(model)
         except anthropic.AuthenticationError:
             raise
+        except anthropic.NotFoundError as err:
+            raise ValueError(
+                f"Model '{model}' was not found or is not accessible with this API key."
+            ) from err
         except Exception as err:
             raise ConnectionError(f"Failed to connect to Anthropic API: {err}") from err
 
@@ -615,6 +640,10 @@ class OllamaClient(BaseLLMClient):
             except aiohttp.ClientError as err:
                 last_error = err
                 break
+        if isinstance(last_error, TimeoutError):
+            raise TimeoutError(
+                f"Ollama at {self._host} timed out after retries"
+            ) from last_error
         raise ConnectionError(
             self._describe_error(last_error)
         ) from last_error
@@ -681,6 +710,10 @@ class OllamaClient(BaseLLMClient):
                 last_error = err
                 break
 
+        if isinstance(last_error, TimeoutError):
+            raise TimeoutError(
+                f"Ollama at {self._host} timed out after retries"
+            ) from last_error
         raise ConnectionError(
             self._describe_error(last_error)
         ) from last_error

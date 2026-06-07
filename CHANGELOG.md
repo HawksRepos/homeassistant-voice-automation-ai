@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-07
+
+### Added
+- **Prompt caching for Anthropic** — the system prompt and tool definitions are now sent as a cacheable prefix (`cache_control: ephemeral`). Repeated tool-use rounds within a turn, and follow-up turns, read the prefix from cache instead of re-billing it (~90% cheaper on the cached portion).
+- **"Allow sensitive actions" option** — a new options-flow toggle gates voice control of high-impact domains (`lock`, `alarm_control_panel`). Defaults to enabled to preserve existing behaviour; disable it to block these actions entirely.
+- **Per-turn action summary in history** — when a turn performs state-changing actions (service calls, automation/script/scene/blueprint edits), a compact note is appended to the stored assistant turn (never spoken). This gives later turns context for follow-ups like "undo that" or "what did you just change?".
+
+### Changed
+- **Model catalog refreshed** — removed retired model IDs (`claude-3-5-sonnet-20241022`, `claude-3-opus-20240229`) that the API now returns 404 for. Added current-generation models (Claude Opus 4.8, Sonnet 4.6, Haiku 4.5); the default is now Sonnet 4.6. Previously-saved models remain selectable.
+- **LLM client reuse** — the conversation agent caches its LLM client across turns and rebuilds it only when connection settings change, reusing the HTTP connection pool instead of recreating it every request.
+- **Free Anthropic connection validation** — setup and every options save now validate via `models.retrieve` (a free metadata lookup) instead of a billed `messages.create` call. This still verifies the API key and that the model is accessible, at no token cost, and now surfaces a clear "model not found" error on the Anthropic setup step too.
+- **Minimum `anthropic` SDK bumped** to `>=0.49.0`.
+
+### Security
+- **Service-call target hardening** — `call_service` now strips `area_id`, `device_id`, `label_id`, `floor_id`, and `target` from `service_data`, so a single-entity request cannot be widened into an area/device/label-wide action. Non-object `service_data` is now rejected.
+
+### Fixed
+- **`create_simple_message` robustness** — YAML generation now selects the first text block in the response instead of assuming `content[0]` is text, so a leading thinking block no longer raises.
+
+### Internal
+- **Security helpers consolidated** — `_check_yaml_for_blocked_services` and the `!input`-aware YAML loader, previously duplicated across `conversation.py`, `__init__.py`, and `file_manager.py`, now live in a single `security.py` module. The blocked-service scan was simplified to one recursive walk (removing a redundant second traversal). Existing entry points are preserved as thin wrappers.
+
 ## [0.4.1] - 2026-03-20
 
 ### Security

@@ -1,7 +1,7 @@
 # Voice Automation AI for Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![GitHub release](https://img.shields.io/github/release/jjtortosa/homeassistant-voice-automation-ai.svg)](https://GitHub.com/jjtortosa/homeassistant-voice-automation-ai/releases/)
+[![GitHub release](https://img.shields.io/github/release/HawksRepos/homeassistant-voice-automation-ai.svg)](https://GitHub.com/HawksRepos/homeassistant-voice-automation-ai/releases/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Development Status](https://img.shields.io/badge/status-beta-orange.svg)
 
@@ -40,7 +40,7 @@ Control your smart home with natural language using AI. Supports **Anthropic Cla
 2. Click on "Integrations"
 3. Click the three dots in the top right corner
 4. Select "Custom repositories"
-5. Add `https://github.com/jjtortosa/homeassistant-voice-automation-ai` as an Integration
+5. Add `https://github.com/HawksRepos/homeassistant-voice-automation-ai` as an Integration
 6. Click "Install" on the Voice Automation AI card
 7. Restart Home Assistant
 
@@ -293,8 +293,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- [Report bugs](https://github.com/jjtortosa/homeassistant-voice-automation-ai/issues)
-- [Request features](https://github.com/jjtortosa/homeassistant-voice-automation-ai/issues)
+- [Report bugs](https://github.com/HawksRepos/homeassistant-voice-automation-ai/issues)
+- [Request features](https://github.com/HawksRepos/homeassistant-voice-automation-ai/issues)
 - [Community discussion](https://community.home-assistant.io/)
 
 ---

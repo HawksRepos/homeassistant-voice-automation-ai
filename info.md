@@ -49,4 +49,4 @@ Very affordable! About **$0.01 per automation** created.
 
 ## More Info
 
-[Full Documentation](https://github.com/jjtortosa/homeassistant-voice-automation-ai)
+[Full Documentation](https://github.com/HawksRepos/homeassistant-voice-automation-ai)

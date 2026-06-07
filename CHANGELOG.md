@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-07
+
+### Fixed
+- **Repository links corrected** — the README and `info.md` pointed at the wrong GitHub repo (`jjtortosa/...`, the upstream this was forked from); all links now point at `HawksRepos/...`, so the HACS install instructions reference the correct repository. Added `issue_tracker` to the manifest.
+
 ## [0.7.0] - 2026-06-07
 
 ### Added

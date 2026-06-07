@@ -122,12 +122,12 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "call_service",
-        "description": "Call a Home Assistant service to control devices. Examples: turn on/off lights, lock/unlock doors, set climate temperature, play/pause media, open/close covers.",
+        "description": "Call a Home Assistant service to control devices. Examples: turn on/off lights, lock/unlock doors, set climate temperature, play/pause media, open/close covers, and control robot vacuums (vacuum.start to clean, vacuum.return_to_base to send it home, vacuum.clean_area with an area_id to clean a specific room).",
         "parameters": {
-            "domain": {"type": "string", "description": "The service domain (e.g. light, switch, climate, lock, cover, media_player, fan).", "required": True},
-            "service": {"type": "string", "description": "The service to call (e.g. turn_on, turn_off, toggle, lock, unlock, set_temperature, open_cover, close_cover).", "required": True},
-            "entity_id": {"type": "string", "description": "The entity ID to target (e.g. light.living_room).", "required": True},
-            "service_data": {"type": "string", "description": "Optional JSON string of additional service data (e.g. {\"brightness\": 255, \"color_name\": \"red\"}).", "required": False},
+            "domain": {"type": "string", "description": "The service domain (e.g. light, switch, climate, lock, cover, media_player, fan, vacuum).", "required": True},
+            "service": {"type": "string", "description": "The service to call (e.g. turn_on, turn_off, toggle, lock, unlock, set_temperature, open_cover, close_cover, start, return_to_base, clean_area).", "required": True},
+            "entity_id": {"type": "string", "description": "The entity ID to target (e.g. light.living_room, vacuum.robot).", "required": True},
+            "service_data": {"type": "string", "description": "Optional JSON string of additional service data (e.g. {\"brightness\": 255, \"color_name\": \"red\"}). For vacuum.clean_area, include the area to clean as {\"area_id\": \"kitchen\"}.", "required": False},
         },
     },
     {
@@ -135,6 +135,22 @@ TOOL_DEFINITIONS = [
         "description": "Get the current state and attributes of a Home Assistant entity.",
         "parameters": {
             "entity_id": {"type": "string", "description": "The entity ID to query (e.g. light.living_room, sensor.temperature).", "required": True},
+        },
+    },
+    # ── Long-term memory tools ──
+    {
+        "name": "remember",
+        "description": "Save a durable fact or preference to long-term memory so it is available in ALL future conversations (it persists across restarts). Use for stable facts about the home, the user's preferences, device aliases, or improvement requests the user makes. Do not store one-off requests, transient state, or anything secret (passwords, tokens). If the fact is already known, calling this refreshes it.",
+        "parameters": {
+            "text": {"type": "string", "description": "The fact or preference to remember, as a short self-contained sentence.", "required": True},
+            "category": {"type": "string", "description": "One of: preference, system, improvement, general. Use 'improvement' for changes the user wants made later.", "required": False},
+        },
+    },
+    {
+        "name": "forget",
+        "description": "Remove matching entries from long-term memory. Use when the user asks you to forget something or a stored fact is no longer true.",
+        "parameters": {
+            "query": {"type": "string", "description": "Text to match against stored memories (substring match); all matching entries are removed.", "required": True},
         },
     },
     # ── Blueprint tools ──

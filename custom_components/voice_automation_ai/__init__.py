@@ -17,10 +17,15 @@ from .const import (
     ATTR_AUTOMATION_ID,
     ATTR_BLUEPRINT_DOMAIN,
     ATTR_BLUEPRINT_NAME,
+    ATTR_CATEGORY,
+    ATTR_CONFIRM,
     ATTR_DESCRIPTION,
+    ATTR_PINNED,
     ATTR_PREVIEW,
+    ATTR_QUERY,
     ATTR_SCENE_ID,
     ATTR_SCRIPT_NAME,
+    ATTR_TEXT,
     ATTR_VALIDATE_ONLY,
     ATTR_YAML_CONTENT,
     CONF_API_KEY,
@@ -43,6 +48,8 @@ from .const import (
     PLATFORMS,
     PROVIDER_ANTHROPIC,
     PROVIDER_OLLAMA,
+    SERVICE_ADD_MEMORY,
+    SERVICE_CLEAR_MEMORIES,
     SERVICE_CREATE_AUTOMATION,
     SERVICE_CREATE_BLUEPRINT,
     SERVICE_CREATE_SCENE,
@@ -57,12 +64,15 @@ from .const import (
     SERVICE_EDIT_SCRIPT,
     SERVICE_LIST_AUTOMATIONS,
     SERVICE_LIST_BLUEPRINTS,
+    SERVICE_LIST_MEMORIES,
     SERVICE_LIST_SCENES,
     SERVICE_LIST_SCRIPTS,
+    SERVICE_REMOVE_MEMORY,
     SERVICE_VALIDATE_AUTOMATION,
 )
 from .file_manager import HAConfigFileManager
 from .llm_client import create_llm_client
+from .memory import MemoryManager
 from .security import check_yaml_for_blocked_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -136,6 +146,20 @@ DELETE_BLUEPRINT_SCHEMA = vol.Schema({
 
 LIST_BLUEPRINTS_SCHEMA = vol.Schema({
     vol.Optional(ATTR_BLUEPRINT_DOMAIN, default="automation"): vol.In(_VALID_BLUEPRINT_DOMAINS),
+})
+
+ADD_MEMORY_SCHEMA = vol.Schema({
+    vol.Required(ATTR_TEXT): cv.string,
+    vol.Optional(ATTR_CATEGORY, default="general"): cv.string,
+    vol.Optional(ATTR_PINNED, default=False): cv.boolean,
+})
+
+REMOVE_MEMORY_SCHEMA = vol.Schema({
+    vol.Required(ATTR_QUERY): cv.string,
+})
+
+CLEAR_MEMORIES_SCHEMA = vol.Schema({
+    vol.Required(ATTR_CONFIRM, default=False): cv.boolean,
 })
 
 
@@ -217,6 +241,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN]["file_manager"] = HAConfigFileManager(hass)
 
     fm = hass.data[DOMAIN]["file_manager"]
+
+    # Create shared long-term memory manager
+    if "memory" not in hass.data[DOMAIN]:
+        hass.data[DOMAIN]["memory"] = MemoryManager(hass)
+
+    memory = hass.data[DOMAIN]["memory"]
 
     # ── Service handlers ──
 
@@ -599,6 +629,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # ── Register all services ──
 
+    # ── Long-term memory service handlers ──
+
+    async def handle_add_memory(call: ServiceCall) -> None:
+        """Handle add_memory service call."""
+        try:
+            result = await memory.async_add(
+                call.data[ATTR_TEXT],
+                call.data.get(ATTR_CATEGORY, "general"),
+                call.data.get(ATTR_PINNED, False),
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        _LOGGER.info("Memory %s: %s", result["status"], result["text"])
+
+    async def handle_remove_memory(call: ServiceCall) -> None:
+        """Handle remove_memory service call."""
+        removed = await memory.async_remove(call.data[ATTR_QUERY])
+        _LOGGER.info("Removed %d memory item(s)", removed)
+
+    async def handle_list_memories(call: ServiceCall) -> None:
+        """Handle list_memories service call."""
+        items = await memory.async_list()
+        if not items:
+            _LOGGER.info("Long-term memory is empty")
+        for m in items:
+            _LOGGER.info(
+                "Memory [%s]%s: %s",
+                m.get("category", "general"),
+                " (pinned)" if m.get("pinned") else "",
+                m.get("text", ""),
+            )
+
+    async def handle_clear_memories(call: ServiceCall) -> None:
+        """Handle clear_memories service call (guarded - wipes everything)."""
+        if not call.data.get(ATTR_CONFIRM, False):
+            raise HomeAssistantError(
+                "This permanently erases ALL long-term memory and cannot be "
+                "undone. Re-run with 'confirm: true' if you really want to wipe it."
+            )
+        await memory.async_clear()
+        _LOGGER.warning("Cleared ALL long-term memories (user confirmed)")
+
     services = [
         (SERVICE_CREATE_AUTOMATION, handle_create_automation, CREATE_AUTOMATION_SCHEMA),
         (SERVICE_VALIDATE_AUTOMATION, handle_validate_automation, VALIDATE_AUTOMATION_SCHEMA),
@@ -617,6 +689,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         (SERVICE_EDIT_BLUEPRINT, handle_edit_blueprint, EDIT_BLUEPRINT_SCHEMA),
         (SERVICE_DELETE_BLUEPRINT, handle_delete_blueprint, DELETE_BLUEPRINT_SCHEMA),
         (SERVICE_LIST_BLUEPRINTS, handle_list_blueprints, LIST_BLUEPRINTS_SCHEMA),
+        (SERVICE_ADD_MEMORY, handle_add_memory, ADD_MEMORY_SCHEMA),
+        (SERVICE_REMOVE_MEMORY, handle_remove_memory, REMOVE_MEMORY_SCHEMA),
+        (SERVICE_LIST_MEMORIES, handle_list_memories, None),
+        (SERVICE_CLEAR_MEMORIES, handle_clear_memories, CLEAR_MEMORIES_SCHEMA),
     ]
 
     for service_name, handler, schema in services:
@@ -643,17 +719,22 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         SERVICE_LIST_AUTOMATIONS, SERVICE_LIST_SCRIPTS, SERVICE_LIST_SCENES,
         SERVICE_CREATE_BLUEPRINT, SERVICE_EDIT_BLUEPRINT,
         SERVICE_DELETE_BLUEPRINT, SERVICE_LIST_BLUEPRINTS,
+        SERVICE_ADD_MEMORY, SERVICE_REMOVE_MEMORY,
+        SERVICE_LIST_MEMORIES, SERVICE_CLEAR_MEMORIES,
     ]
     for service_name in all_services:
         hass.services.async_remove(DOMAIN, service_name)
 
     hass.data[DOMAIN].pop(entry.entry_id, None)
 
+    # Drop shared singletons once the last config entry is unloaded.
+    _SHARED_KEYS = {"file_manager", "memory"}
     remaining_entries = [
-        key for key in hass.data[DOMAIN] if key != "file_manager"
+        key for key in hass.data[DOMAIN] if key not in _SHARED_KEYS
     ]
     if not remaining_entries:
-        hass.data[DOMAIN].pop("file_manager", None)
+        for shared_key in _SHARED_KEYS:
+            hass.data[DOMAIN].pop(shared_key, None)
 
     return unload_ok
 

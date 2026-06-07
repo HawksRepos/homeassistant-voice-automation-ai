@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-07
+
+### Added
+- **Global long-term memory** — the assistant now has a single, home-wide memory that persists across restarts and is shared by every conversation, so it builds up an understanding of your home, your preferences, and improvement requests over time.
+  - **Token-light** — a compact, capped "Long-term memory" block is injected into the system prompt. It sits in the cached prefix (from 0.5.0), so it costs almost nothing per turn.
+  - **Tools** — the assistant can `remember` durable facts/preferences (categories: `preference`, `system`, `improvement`, `general`) and `forget` them.
+  - **Editable by you** — stored as human-readable JSON at `config/voice_automation_ai_memory.json` (loaded fresh each turn, so hand-edits apply immediately), plus services `add_memory`, `remove_memory`, `list_memories`, and `clear_memories` in Developer Tools.
+  - **Self-maintaining** — on use, unpinned memories not reinforced within the retention window (default 90 days, configurable) are pruned, and the total is capped (50). Re-mentioning a fact refreshes it; pinned facts never expire.
+  - **Safe** — refuses to store anything that looks like a secret (passwords, tokens, keys) and caps each entry's length.
+- **Options** — `Enable Long-Term Memory` (default on) and `Memory Retention (days)` added to the options flow.
+- **Robot vacuum control** — the assistant can now drive vacuums via the `vacuum` domain: "start the vacuum", "send it home", and — on Home Assistant 2026.3+ — "clean the kitchen" via `vacuum.clean_area` with an area name.
+
+### Security
+- **Memory injection hardening** — the injected memory block is explicitly framed as reference data, not instructions, so a stored note can't authorize an action on its own. The service allowlist and sensitive-action gating remain the real guardrails regardless of what's stored.
+- **Bounded memory context** — the per-turn memory block is capped to a character budget (pinned + most-recent first), keeping token use predictable and limiting the blast radius of any single entry.
+- **Guarded memory reset** — `clear_memories` now requires `confirm: true` and the assistant confirms before any bulk forget, so memory can't be wiped accidentally. (The assistant only has a *targeted* `forget` tool — it cannot erase everything in one call.)
+- **Self-modification explicitly out of scope** — the assistant can fix your automations/scripts/scenes and log integration bug reports/ideas to memory (category `improvement`) for review, but it cannot and does not modify its own program code.
+- **Targeted vacuum exception** — `area_id` is permitted only for the `vacuum` domain (a single low-risk device); the target-broadening strip is unchanged for every other domain.
+
+### Notes
+- **Caching & new devices** — the available-entity list is rebuilt from live state on every turn, so a newly added device is visible on the next message. Prompt caching keys on the rendered prompt, so a changed entity list is a cache miss (fresh), never a stale hit.
+
 ## [0.6.0] - 2026-06-07
 
 ### Added

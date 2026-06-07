@@ -55,6 +55,8 @@
           "max_tokens": "Max Response Tokens",
           "max_history_turns": "Conversation History Turns",
           "allow_sensitive_actions": "Allow Sensitive Actions",
+          "enable_memory": "Enable Long-Term Memory",
+          "memory_retention_days": "Memory Retention (days)",
           "temperature": "Temperature",
           "top_p": "Top P"
         },
@@ -65,6 +67,8 @@
           "max_tokens": "Maximum tokens per LLM response (256-32768)",
           "max_history_turns": "Number of conversation turns to remember (1-50)",
           "allow_sensitive_actions": "Allow voice control of locks and alarm panels. Disable to block these high-impact actions.",
+          "enable_memory": "Let the assistant save durable facts and preferences shared across all conversations.",
+          "memory_retention_days": "Unpinned memories not reinforced within this many days are automatically removed (1-3650).",
           "temperature": "Controls randomness (0.0-2.0). Lower = more focused, higher = more creative. Leave empty for model default.",
           "top_p": "Nucleus sampling (0.0-1.0). Controls diversity of responses. Leave empty for model default."
         }

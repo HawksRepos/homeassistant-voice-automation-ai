@@ -243,6 +243,29 @@ class TestGetEntitiesContext:
         context = fm.get_entities_context()
         assert context == "No entities available"
 
+    def test_reflects_newly_added_entity(self, hass):
+        """The context is rebuilt from live states each call, so a device added
+        after the first call appears on the next one (no stale caching).
+
+        This guards the user-facing concern: caching must never hide a newly
+        added device. The Anthropic prompt cache keys on the rendered prompt, so
+        a changed entity list is a cache miss, not a stale hit.
+        """
+        hass.config.config_dir = "/tmp/fake"
+        fm = HAConfigFileManager(hass)
+
+        hass.states.async_all.return_value = [FakeState("light.living_room")]
+        first = fm.get_entities_context()
+        assert "light.new_lamp" not in first
+
+        # User adds a new device.
+        hass.states.async_all.return_value = [
+            FakeState("light.living_room"),
+            FakeState("light.new_lamp"),
+        ]
+        second = fm.get_entities_context()
+        assert "light.new_lamp" in second
+
     def test_skips_malformed_ids(self, hass):
         """Entity IDs that fail regex are excluded from context."""
         hass.config.config_dir = "/tmp/fake"

@@ -15,18 +15,22 @@ from .const import (
     ANTHROPIC_MODELS,
     CONF_ALLOW_SENSITIVE_ACTIONS,
     CONF_API_KEY,
+    CONF_ENABLE_MEMORY,
     CONF_LANGUAGE,
     CONF_MAX_HISTORY_TURNS,
     CONF_MAX_TOKENS,
+    CONF_MEMORY_RETENTION_DAYS,
     CONF_MODEL,
     CONF_OLLAMA_HOST,
     CONF_PROVIDER,
     CONF_TEMPERATURE,
     CONF_TOP_P,
     DEFAULT_ALLOW_SENSITIVE_ACTIONS,
+    DEFAULT_ENABLE_MEMORY,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_HISTORY_TURNS,
     DEFAULT_MAX_TOKENS,
+    DEFAULT_MEMORY_RETENTION_DAYS,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_OLLAMA_MODEL,
@@ -336,6 +340,12 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
         current_allow_sensitive = self._config_entry.options.get(
             CONF_ALLOW_SENSITIVE_ACTIONS, DEFAULT_ALLOW_SENSITIVE_ACTIONS
         )
+        current_enable_memory = self._config_entry.options.get(
+            CONF_ENABLE_MEMORY, DEFAULT_ENABLE_MEMORY
+        )
+        current_memory_retention = self._config_entry.options.get(
+            CONF_MEMORY_RETENTION_DAYS, DEFAULT_MEMORY_RETENTION_DAYS
+        )
 
         # If current model is custom (not in list), add it so dropdown works
         if current_model not in model_options:
@@ -353,6 +363,12 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
             vol.Required(
                 CONF_ALLOW_SENSITIVE_ACTIONS, default=current_allow_sensitive
             ): bool,
+            vol.Required(
+                CONF_ENABLE_MEMORY, default=current_enable_memory
+            ): bool,
+            vol.Required(
+                CONF_MEMORY_RETENTION_DAYS, default=current_memory_retention
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=3650)),
         }
 
         # Add Ollama-specific options

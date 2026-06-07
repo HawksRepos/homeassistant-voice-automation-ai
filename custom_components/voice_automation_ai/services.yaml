@@ -249,3 +249,60 @@ list_blueprints:
           options:
             - "automation"
             - "script"
+
+add_memory:
+  name: Add Memory
+  description: Save a durable fact or preference to the assistant's global long-term memory.
+  fields:
+    text:
+      name: Text
+      description: The fact or preference to remember (a short sentence). Do not include secrets.
+      required: true
+      example: "The main bedroom light is light.main_bedroom_light"
+      selector:
+        text:
+    category:
+      name: Category
+      description: "Category: preference, system, improvement, or general."
+      default: "general"
+      selector:
+        select:
+          options:
+            - "preference"
+            - "system"
+            - "improvement"
+            - "general"
+    pinned:
+      name: Pinned
+      description: Pinned memories are never automatically removed.
+      default: false
+      selector:
+        boolean:
+
+remove_memory:
+  name: Remove Memory
+  description: Remove matching entries from long-term memory (by text substring or id).
+  fields:
+    query:
+      name: Query
+      description: Text to match against stored memories; all matches are removed.
+      required: true
+      example: "bedroom light"
+      selector:
+        text:
+
+list_memories:
+  name: List Memories
+  description: Log all stored long-term memories (view them in the Home Assistant log).
+
+clear_memories:
+  name: Clear Memories
+  description: "WARNING: permanently erases ALL long-term memory. Cannot be undone. You must enable Confirm."
+  fields:
+    confirm:
+      name: Confirm
+      description: Must be enabled to actually wipe all memory.
+      required: true
+      default: false
+      selector:
+        boolean:

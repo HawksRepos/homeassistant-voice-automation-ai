@@ -35,6 +35,8 @@ CONF_MAX_HISTORY_TURNS = "max_history_turns"
 CONF_TEMPERATURE = "temperature"
 CONF_TOP_P = "top_p"
 CONF_ALLOW_SENSITIVE_ACTIONS = "allow_sensitive_actions"
+CONF_ENABLE_MEMORY = "enable_memory"
+CONF_MEMORY_RETENTION_DAYS = "memory_retention_days"
 
 # Defaults for options
 DEFAULT_MAX_TOKENS = 4096
@@ -42,6 +44,26 @@ DEFAULT_MAX_HISTORY_TURNS = 10
 # Default True preserves prior behaviour on upgrade (locks/alarms were already
 # controllable). Security-conscious users can disable it in the options flow.
 DEFAULT_ALLOW_SENSITIVE_ACTIONS = True
+
+# ── Long-term memory ──
+DEFAULT_ENABLE_MEMORY = True
+# Unpinned memories not reinforced within this many days are pruned on use.
+DEFAULT_MEMORY_RETENTION_DAYS = 90
+# Human-editable JSON file in the HA config directory.
+MEMORY_FILENAME = "voice_automation_ai_memory.json"
+# Hard caps to keep the injected context small and the file tidy.
+MAX_MEMORY_ITEMS = 50
+MAX_MEMORY_TEXT_LEN = 300
+# Hard ceiling on the characters injected into the prompt per turn (keeps token
+# use bounded and limits the blast radius of any single poisoned entry).
+MEMORY_PROMPT_CHAR_BUDGET = 4000
+# Suggested categories (free-form is allowed; these guide the model).
+MEMORY_CATEGORIES = ("preference", "system", "improvement", "general")
+# Substrings that cause a memory write to be refused (never persist secrets).
+MEMORY_SECRET_KEYWORDS = (
+    "password", "passwd", "secret", "token", "api key", "api_key",
+    "apikey", "bearer ", "private key", "credential",
+)
 
 # Available Anthropic models.
 # Keep current-generation models only; retired model IDs (e.g. claude-3-opus,
@@ -95,6 +117,10 @@ SERVICE_CREATE_BLUEPRINT = "create_blueprint"
 SERVICE_EDIT_BLUEPRINT = "edit_blueprint"
 SERVICE_DELETE_BLUEPRINT = "delete_blueprint"
 SERVICE_LIST_BLUEPRINTS = "list_blueprints"
+SERVICE_ADD_MEMORY = "add_memory"
+SERVICE_REMOVE_MEMORY = "remove_memory"
+SERVICE_LIST_MEMORIES = "list_memories"
+SERVICE_CLEAR_MEMORIES = "clear_memories"
 
 # Attributes
 ATTR_DESCRIPTION = "description"
@@ -106,6 +132,11 @@ ATTR_SCRIPT_NAME = "script_name"
 ATTR_SCENE_ID = "scene_id"
 ATTR_BLUEPRINT_NAME = "blueprint_name"
 ATTR_BLUEPRINT_DOMAIN = "blueprint_domain"
+ATTR_TEXT = "text"
+ATTR_CATEGORY = "category"
+ATTR_PINNED = "pinned"
+ATTR_QUERY = "query"
+ATTR_CONFIRM = "confirm"
 
 # API
 API_TIMEOUT = 30

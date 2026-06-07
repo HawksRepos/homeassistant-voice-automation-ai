@@ -24,6 +24,12 @@ from custom_components.voice_automation_ai.conversation import (
 @pytest.fixture
 def agent(hass, config_entry):
     """Create a conversation agent with mocked dependencies."""
+    memory_mock = MagicMock()
+    memory_mock.async_prompt_block = AsyncMock(return_value="")
+    memory_mock.async_add = AsyncMock(
+        return_value={"status": "added", "text": "noted"}
+    )
+    memory_mock.async_remove = AsyncMock(return_value=0)
     hass.data[DOMAIN] = {
         config_entry.entry_id: {
             "provider": "anthropic",
@@ -34,6 +40,7 @@ def agent(hass, config_entry):
             "max_history_turns": 10,
         },
         "file_manager": MagicMock(),
+        "memory": memory_mock,
     }
     return VoiceAutomationAIConversationAgent(hass, config_entry)
 
@@ -163,6 +170,40 @@ class TestCallServiceSecurity:
         # Legitimate data is preserved and targeting is forced to the entity.
         assert sent["transition"] == 2
         assert sent["entity_id"] == "light.living_room"
+
+    async def test_vacuum_clean_area_allows_area_id(self, agent):
+        """area_id is a legitimate parameter for vacuum.clean_area and must
+        survive (it is stripped for every other domain)."""
+        agent.hass.services.async_call = AsyncMock()
+        result = await agent._execute_tool(
+            "call_service",
+            {
+                "domain": "vacuum",
+                "service": "clean_area",
+                "entity_id": "vacuum.robot",
+                "service_data": json.dumps({"area_id": "kitchen"}),
+            },
+        )
+        assert result["success"] is True
+        sent = agent.hass.services.async_call.call_args[0][2]
+        assert sent["area_id"] == "kitchen"
+        assert sent["entity_id"] == "vacuum.robot"
+
+    async def test_vacuum_still_strips_other_broadening_keys(self, agent):
+        """Only area_id is allowed for vacuum; device_id/target still stripped."""
+        agent.hass.services.async_call = AsyncMock()
+        await agent._execute_tool(
+            "call_service",
+            {
+                "domain": "vacuum",
+                "service": "clean_area",
+                "entity_id": "vacuum.robot",
+                "service_data": json.dumps({"area_id": "kitchen", "device_id": "x"}),
+            },
+        )
+        sent = agent.hass.services.async_call.call_args[0][2]
+        assert sent["area_id"] == "kitchen"
+        assert "device_id" not in sent
 
 
 # ── Security: sensitive-domain gating ──
@@ -857,6 +898,89 @@ class TestActionSummary:
             assert VoiceAutomationAIConversationAgent._summarize_action(
                 name, inp, {"success": True}
             ) is None
+
+    def test_summarize_remember(self):
+        s = VoiceAutomationAIConversationAgent._summarize_action(
+            "remember", {}, {"success": True, "text": "bedroom = light.bed"}
+        )
+        assert "bedroom = light.bed" in s
+
+    def test_summarize_forget(self):
+        s = VoiceAutomationAIConversationAgent._summarize_action(
+            "forget", {}, {"success": True, "removed": 2}
+        )
+        assert "2" in s
+
+
+# ── Long-term memory tools ──
+
+
+class TestMemoryTools:
+    """Test remember/forget dispatch and prompt injection."""
+
+    async def test_remember_tool(self, agent):
+        result = await agent._execute_tool(
+            "remember", {"text": "bedroom = light.bed", "category": "system"}
+        )
+        assert result["success"] is True
+        agent._memory.async_add.assert_awaited_once()
+
+    async def test_remember_disabled(self, agent):
+        agent.hass.data[DOMAIN][agent._config_entry.entry_id]["enable_memory"] = False
+        result = await agent._execute_tool("remember", {"text": "x"})
+        assert result["success"] is False
+        assert "disabled" in result["error"].lower()
+        agent._memory.async_add.assert_not_called()
+
+    async def test_remember_rejects_secret(self, agent):
+        agent._memory.async_add = AsyncMock(
+            side_effect=ValueError("Refusing to store text that looks like a secret.")
+        )
+        result = await agent._execute_tool("remember", {"text": "the password is x"})
+        assert result["success"] is False
+        assert "secret" in result["error"].lower()
+
+    async def test_forget_tool(self, agent):
+        agent._memory.async_remove = AsyncMock(return_value=2)
+        result = await agent._execute_tool("forget", {"query": "bedroom"})
+        assert result["success"] is True
+        assert result["removed"] == 2
+
+    async def test_memory_block_injected_into_system_prompt(self, agent):
+        agent._memory.async_prompt_block = AsyncMock(
+            return_value="Long-term memory:\n- [system] bedroom = light.bed"
+        )
+        captured = {}
+
+        async def fake(client, model, system_prompt, messages, max_tokens, actions=None):
+            captured["system"] = system_prompt
+            return "ok"
+
+        with patch.object(agent, "_call_with_tools", side_effect=fake):
+            user_input = MagicMock()
+            user_input.text = "hi"
+            user_input.conversation_id = "c-mem"
+            await agent.async_process(user_input)
+
+        assert "bedroom = light.bed" in captured["system"]
+
+    async def test_memory_not_injected_when_disabled(self, agent):
+        agent.hass.data[DOMAIN][agent._config_entry.entry_id]["enable_memory"] = False
+        agent._memory.async_prompt_block = AsyncMock(return_value="SHOULD NOT APPEAR")
+        captured = {}
+
+        async def fake(client, model, system_prompt, messages, max_tokens, actions=None):
+            captured["system"] = system_prompt
+            return "ok"
+
+        with patch.object(agent, "_call_with_tools", side_effect=fake):
+            user_input = MagicMock()
+            user_input.text = "hi"
+            user_input.conversation_id = "c-mem2"
+            await agent.async_process(user_input)
+
+        assert "SHOULD NOT APPEAR" not in captured["system"]
+        agent._memory.async_prompt_block.assert_not_called()
 
     def test_summarize_call_service(self):
         s = VoiceAutomationAIConversationAgent._summarize_action(

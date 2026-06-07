@@ -22,14 +22,15 @@ Control your smart home with natural language using AI. Supports **Anthropic Cla
 
 - **Voice-controlled home management** - Describe what you want in natural language
 - **Dual LLM provider support** - Anthropic Claude (cloud) or Ollama (local/self-hosted)
-- **19 built-in tools** - The AI can control devices, query states, and manage configurations
+- **24 built-in tools** - The AI can control devices, query states, read existing configs, and manage configurations
+- **Long-term memory** - A global, persistent memory of facts and preferences shared across every conversation, with automatic upkeep
 - **Blueprint support** - Create, read, edit, and delete reusable blueprint templates
-- **Full CRUD for automations, scripts, and scenes** - Create, edit, delete, and list
+- **Full CRUD for automations, scripts, and scenes** - Create, read, edit, delete, and list
 - **Device control** - Turn on/off lights, lock doors, set temperatures, and more
 - **YAML validation** - Ensures generated configurations are valid before applying
 - **Multilingual** - Supports English, Catalan, Spanish, French, and German
 - **Context-aware** - Uses your existing Home Assistant entities for accurate responses
-- **Security built-in** - Blocked service domains, sensitive attribute stripping, entity ID validation
+- **Security built-in** - Blocked service domains, sensitive attribute stripping, entity ID validation, optional gating of locks/alarms, and single-entity service targeting
 
 ## Installation
 
@@ -93,6 +94,8 @@ Control your smart home with natural language using AI. Supports **Anthropic Cla
    - "Create an automation that locks the door at 10 PM"
    - "List my blueprints"
    - "Create a blueprint for motion-activated lights"
+   - "Hoover the kitchen" (robot vacuums; room cleaning needs Home Assistant 2026.3+)
+   - "Remember that I prefer warm lighting at night"
 
 ### Via Service Call
 
@@ -112,9 +115,9 @@ data:
   blueprint_domain: "automation"
 ```
 
-## Available Tools (19)
+## Available Tools (24)
 
-The AI conversation agent has access to 19 tools:
+The AI conversation agent has access to 24 tools:
 
 ### Device Control
 | Tool | Description |
@@ -122,10 +125,17 @@ The AI conversation agent has access to 19 tools:
 | `call_service` | Call any HA service (light, switch, climate, etc.) |
 | `get_entity_state` | Get current state and attributes of an entity |
 
+### Long-Term Memory
+| Tool | Description |
+|------|-------------|
+| `remember` | Save a durable fact or preference shared across all conversations |
+| `forget` | Remove matching entries from long-term memory |
+
 ### Automations
 | Tool | Description |
 |------|-------------|
 | `list_automations` | List all automations |
+| `read_automation` | Read the full configuration of an automation by ID |
 | `create_automation` | Create a new automation from YAML |
 | `edit_automation` | Edit an existing automation by ID |
 | `delete_automation` | Delete an automation by ID |
@@ -134,6 +144,7 @@ The AI conversation agent has access to 19 tools:
 | Tool | Description |
 |------|-------------|
 | `list_scripts` | List all scripts |
+| `read_script` | Read the full configuration of a script by name |
 | `create_script` | Create a new script |
 | `edit_script` | Edit an existing script by name |
 | `delete_script` | Delete a script by name |
@@ -142,6 +153,7 @@ The AI conversation agent has access to 19 tools:
 | Tool | Description |
 |------|-------------|
 | `list_scenes` | List all scenes |
+| `read_scene` | Read the full configuration of a scene by ID |
 | `create_scene` | Create a new scene |
 | `edit_scene` | Edit an existing scene by ID |
 | `delete_scene` | Delete a scene by ID |
@@ -149,7 +161,7 @@ The AI conversation agent has access to 19 tools:
 ### Blueprints
 | Tool | Description |
 |------|-------------|
-| `list_blueprints` | List all blueprints for a domain |
+| `list_blueprints` | List all blueprints for a domain (including source subfolders) |
 | `read_blueprint` | Read the full YAML of a blueprint |
 | `create_blueprint` | Create a new blueprint file |
 | `edit_blueprint` | Edit a blueprint (propagates to all linked automations) |
@@ -182,6 +194,25 @@ The AI conversation agent has access to 19 tools:
 - `voice_automation_ai.delete_blueprint` - Remove a blueprint
 - `voice_automation_ai.list_blueprints` - List all blueprints for a domain
 
+### Memory Services
+- `voice_automation_ai.add_memory` - Save a durable fact/preference (optionally pinned)
+- `voice_automation_ai.remove_memory` - Remove memories matching a text query
+- `voice_automation_ai.list_memories` - Log all stored memories
+- `voice_automation_ai.clear_memories` - Remove all stored memories
+
+## Long-Term Memory
+
+The assistant keeps a single, global memory shared across every conversation, so it learns your home and preferences over time (e.g. "the main bedroom light is `light.main_bedroom_light`", "prefers warm light at night", improvement requests you make).
+
+- **Stored** in `config/voice_automation_ai_memory.json` — human-readable and editable; hand-edits take effect on the next message.
+- **Token-light** — a small, capped block is added to the prompt and sits in the cached prefix, so it costs almost nothing per turn.
+- **Self-maintaining** — unpinned facts not reinforced within the retention window (default 90 days) are pruned automatically; the total is capped (50 items / a per-turn character budget); pinned facts never expire.
+- **Safe** — the assistant refuses to store secrets (passwords, tokens, keys), and the injected block is treated as reference data, never as commands — a stored note can't authorize an unsafe action (the service allowlist and locks/alarms gating still apply regardless).
+- **Manage it** via the assistant ("remember that…", "forget…") or the memory services above. Disable it entirely with the *Enable Long-Term Memory* option.
+- **Resetting** — wiping everything requires confirmation: call `voice_automation_ai.clear_memories` with `confirm: true` (the assistant only has a *targeted* forget and will confirm before bulk changes). A clean reset is a handy way to clear out odd, stale context.
+
+> **New devices show up immediately:** the list of controllable entities is rebuilt from live state on every message, so adding a device makes it available on your next request — caching never serves a stale device list.
+
 ## Configuration Options
 
 | Option | Description | Default |
@@ -189,19 +220,23 @@ The AI conversation agent has access to 19 tools:
 | Provider | Anthropic Claude or Ollama | Anthropic |
 | API Key | Anthropic API key (Claude only) | Required for Claude |
 | Ollama Host | URL of Ollama instance | `http://localhost:11434` |
-| Model | LLM model to use | Claude Sonnet 4.5 / llama3.1 |
+| Model | LLM model to use | Claude Sonnet 4.6 / llama3.1 |
 | Language | Language for AI responses | Auto-detected from HA |
 | Max Tokens | Maximum response tokens (256-32768) | 4096 |
 | History Turns | Conversation turns to remember (1-50) | 10 |
+| Allow Sensitive Actions | Permit voice control of locks/alarm panels | On |
+| Enable Long-Term Memory | Persist facts/preferences across conversations | On |
+| Memory Retention (days) | Auto-remove unpinned facts after N days (1-3650) | 90 |
 | Temperature | Randomness control (Ollama only, 0.0-2.0) | Model default |
 | Top P | Nucleus sampling (Ollama only, 0.0-1.0) | Model default |
 
 ### Available Models
 
 **Anthropic Claude:**
-- **Claude Sonnet 4.5** (Recommended) - Best balance of speed and intelligence
-- **Claude Opus 4.1** - Most powerful
+- **Claude Opus 4.8** - Most capable
+- **Claude Sonnet 4.6** (Recommended) - Best balance of speed and intelligence
 - **Claude Haiku 4.5** - Fastest and most economical
+- **Claude Sonnet 4.5** (Legacy)
 
 **Ollama:**
 - Any model installed on your Ollama instance is auto-discovered

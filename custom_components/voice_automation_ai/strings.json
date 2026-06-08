@@ -20,6 +20,18 @@
           "model": "Which Claude model to use"
         }
       },
+      "gemini": {
+        "title": "Google Gemini Configuration",
+        "description": "Enter your Google Gemini API key from aistudio.google.com.",
+        "data": {
+          "api_key": "API Key",
+          "model": "Gemini Model"
+        },
+        "data_description": {
+          "api_key": "Your Google Gemini API key from Google AI Studio",
+          "model": "Which Gemini model to use"
+        }
+      },
       "ollama": {
         "title": "Ollama Configuration",
         "description": "Enter the URL where your Ollama instance is running.",

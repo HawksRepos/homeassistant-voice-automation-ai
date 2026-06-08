@@ -1,6 +1,7 @@
-"""Abstraction layer for LLM providers (Anthropic Claude, Ollama)."""
+"""Abstraction layer for LLM providers (Anthropic Claude, Google Gemini, Ollama)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -8,6 +9,14 @@ from typing import Any
 
 import aiohttp
 import anthropic
+
+# Imported at module load (off the event loop) so the first Gemini request
+# doesn't trigger a heavy blocking import on the loop. Absent in environments
+# without the dependency (e.g. tests); GeminiClient falls back to a lazy import.
+try:
+    from google import genai as _genai
+except ImportError:  # pragma: no cover - depends on installed extras
+    _genai = None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -766,10 +775,249 @@ class OllamaClient(BaseLLMClient):
                 return await resp.json()
 
 
+class GeminiClient(BaseLLMClient):
+    """Google Gemini API client (async-native, via the google-genai SDK).
+
+    Everything except the actual SDK call is kept dict-based (tool declarations,
+    message contents, request config) so the conversion logic is unit-testable
+    without the SDK installed. The SDK is imported lazily so the rest of this
+    module loads even when google-genai is absent.
+    """
+
+    def __init__(self, api_key: str, timeout: int = 30) -> None:
+        """Initialize. Uses the module-level SDK import, falling back to a lazy
+        import (so it also works once the dependency is installed at runtime)."""
+        genai = _genai
+        if genai is None:
+            try:
+                from google import genai
+            except ImportError as err:  # pragma: no cover - depends on env
+                raise ImportError(
+                    "The 'google-genai' package is required for the Gemini provider. "
+                    "Home Assistant installs it automatically from the manifest."
+                ) from err
+        self._client = genai.Client(api_key=api_key)
+        self._timeout = timeout
+
+    @property
+    def is_async(self) -> bool:
+        """Gemini client is natively async."""
+        return True
+
+    # ── Conversions (pure - no SDK needed) ──
+
+    def _to_gemini_tools(self) -> list[dict]:
+        """Convert unified tool defs to a Gemini tools list (one Tool with all
+        function declarations). Omits 'parameters' for no-argument tools, which
+        Gemini handles better than an empty parameter object."""
+        declarations = []
+        for tool in TOOL_DEFINITIONS:
+            properties = {}
+            required = []
+            for param_name, param_def in tool["parameters"].items():
+                properties[param_name] = {
+                    "type": param_def["type"],
+                    "description": param_def["description"],
+                }
+                if param_def.get("required"):
+                    required.append(param_name)
+
+            declaration: dict[str, Any] = {
+                "name": tool["name"],
+                "description": tool["description"],
+            }
+            if properties:
+                declaration["parameters"] = {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                }
+            declarations.append(declaration)
+        return [{"function_declarations": declarations}]
+
+    @staticmethod
+    def _to_gemini_contents(messages: list[dict]) -> list[dict]:
+        """Convert internal messages to Gemini 'contents'.
+
+        Simple {role, content} history entries become text parts (assistant ->
+        'model'); entries already in Gemini shape (carrying 'parts') pass through.
+        """
+        contents = []
+        for message in messages:
+            if isinstance(message, dict) and "parts" in message:
+                contents.append(message)
+                continue
+            role = "model" if message.get("role") == "assistant" else "user"
+            contents.append({
+                "role": role,
+                "parts": [{"text": message.get("content", "")}],
+            })
+        return contents
+
+    @staticmethod
+    def _parse_response(response: Any) -> LLMResponse:
+        """Build a unified LLMResponse from a Gemini response object."""
+        text_parts = []
+        tool_calls = []
+        raw_parts: list[dict] = []
+
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", None) or []:
+                fn = getattr(part, "function_call", None)
+                if fn is not None:
+                    args = dict(getattr(fn, "args", None) or {})
+                    call_id = getattr(fn, "id", None) or f"call_{uuid.uuid4().hex[:12]}"
+                    tool_calls.append({"id": call_id, "name": fn.name, "arguments": args})
+                    raw_parts.append({"function_call": {"name": fn.name, "args": args}})
+                    continue
+                text = getattr(part, "text", None)
+                if text:
+                    text_parts.append(text)
+                    raw_parts.append({"text": text})
+
+        return LLMResponse(
+            text=" ".join(text_parts) if text_parts else None,
+            tool_calls=tool_calls,
+            raw_assistant_message={"role": "model", "parts": raw_parts},
+        )
+
+    def add_tool_results(
+        self,
+        messages: list[dict],
+        response: LLMResponse,
+        tool_results: list[dict],
+    ) -> None:
+        """Append the model turn and the function responses in Gemini format."""
+        messages.append(response.raw_assistant_message)
+
+        # Map tool_call_id -> function name from the originating response.
+        name_by_id = {tc["id"]: tc["name"] for tc in response.tool_calls}
+        parts = []
+        for result in tool_results:
+            content = result["content"]
+            try:
+                payload = json.loads(content)
+                if not isinstance(payload, dict):
+                    payload = {"result": payload}
+            except (json.JSONDecodeError, TypeError):
+                payload = {"result": content}
+            parts.append({
+                "function_response": {
+                    "name": name_by_id.get(result["tool_call_id"], "unknown"),
+                    "response": payload,
+                }
+            })
+        messages.append({"role": "user", "parts": parts})
+
+    # ── Sync methods not supported (async-only client) ──
+
+    def create_message(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        """Not supported. Use async_create_message."""
+        raise NotImplementedError("GeminiClient is async-only. Use async_create_message.")
+
+    def create_simple_message(self, *args: Any, **kwargs: Any) -> str:
+        """Not supported. Use async_create_simple_message."""
+        raise NotImplementedError("GeminiClient is async-only. Use async_create_simple_message.")
+
+    def validate_connection(self, *args: Any, **kwargs: Any) -> None:
+        """Not supported. Use async_validate_connection."""
+        raise NotImplementedError("GeminiClient is async-only. Use async_validate_connection.")
+
+    # ── Async implementations ──
+
+    def _build_config(self, system_prompt: str, max_tokens: int, tools: bool) -> dict:
+        config: dict[str, Any] = {
+            "system_instruction": system_prompt,
+            "max_output_tokens": max_tokens,
+        }
+        if tools:
+            config["tools"] = self._to_gemini_tools()
+        return config
+
+    async def async_create_message(
+        self,
+        model: str,
+        system_prompt: str,
+        messages: list[dict],
+        max_tokens: int,
+        tools: bool = True,
+    ) -> LLMResponse:
+        """Send a message to Gemini."""
+        response = await self._call_generate(
+            model=model,
+            contents=self._to_gemini_contents(messages),
+            config=self._build_config(system_prompt, max_tokens, tools),
+        )
+        return self._parse_response(response)
+
+    async def async_create_simple_message(
+        self,
+        model: str,
+        prompt: str,
+        max_tokens: int,
+    ) -> str:
+        """Send a simple prompt to Gemini (no tools)."""
+        response = await self._call_generate(
+            model=model,
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            config={"max_output_tokens": max_tokens},
+        )
+        # Parse the parts ourselves rather than touching response.text, which
+        # raises on a blocked or empty response in the google-genai SDK.
+        parsed = self._parse_response(response)
+        return (parsed.text or "").strip()
+
+    async def async_validate_connection(self, model: str) -> None:
+        """Validate the API key and model with a minimal request.
+
+        Raises the SDK's auth error on a bad key, ValueError if the model is not
+        found, and ConnectionError for anything else.
+        """
+        try:
+            await self._call_generate(
+                model=model,
+                contents=[{"role": "user", "parts": [{"text": "test"}]}],
+                config={"max_output_tokens": 1},
+            )
+        except Exception as err:  # noqa: BLE001 - mapped below
+            status = getattr(err, "code", None) or getattr(err, "status_code", None)
+            message = str(err)
+            if status == 404 or "not found" in message.lower():
+                raise ValueError(
+                    f"Model '{model}' was not found or is not accessible with this API key."
+                ) from err
+            if status in (401, 403) or "api key" in message.lower():
+                raise ConnectionError("Invalid Google Gemini API key.") from err
+            raise ConnectionError(f"Failed to connect to Google Gemini API: {err}") from err
+
+    async def _call_generate(self, model: str, contents: list[dict], config: dict) -> Any:
+        """Make the async generate_content call, bounded by the configured timeout.
+
+        ``asyncio.wait_for`` enforces the timeout regardless of SDK transport
+        details and raises ``TimeoutError`` (Python 3.11+), which the conversation
+        layer maps to a friendly message.
+        """
+        return await asyncio.wait_for(
+            self._client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            ),
+            timeout=self._timeout,
+        )
+
+
 def create_llm_client(provider: str, **kwargs: Any) -> BaseLLMClient:
     """Factory function to create the appropriate LLM client."""
     if provider == "anthropic":
         return AnthropicClient(
+            api_key=kwargs["api_key"],
+            timeout=kwargs.get("timeout", 30),
+        )
+    elif provider == "gemini":
+        return GeminiClient(
             api_key=kwargs["api_key"],
             timeout=kwargs.get("timeout", 30),
         )

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-08
+
+### Added
+- **Google Gemini provider** — Gemini joins Anthropic Claude and Ollama as a selectable LLM provider, so you're not tied to a single vendor. Choose it during setup, enter a Google AI Studio API key, and pick a model (`gemini-2.5-flash` default, plus 2.5 Pro / 2.5 Flash-Lite / 3.5 Flash). Full tool/function-calling support — all 24 tools, the long-term memory, and device control work the same across providers.
+  - Implemented as an async-native `GeminiClient` via Google's `google-genai` SDK (added to the manifest requirements), slotting into the existing provider abstraction.
+  - All providers share the same tool set, system prompt, memory, and security model; only the API client differs.
+  - Requests are bounded by the configured timeout, the SDK is imported off the per-turn hot path, and connection/timeout error messages are now provider-agnostic (no longer always say "Anthropic").
+
+### Notes
+- **Gemini is a cloud provider** (like Claude) — it needs a Google API key and your prompts are sent to Google. **Ollama remains the fully-local/private option.**
+- Switching a configured integration between providers means re-adding it (the API key/provider live in the config entry); the options flow lets you change the model within a provider.
+
 ## [0.7.1] - 2026-06-07
 
 ### Fixed

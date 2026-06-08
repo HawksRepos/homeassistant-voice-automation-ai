@@ -16,12 +16,12 @@
 >
 > **Testers welcome!** Your feedback will help make this integration stable and production-ready.
 
-Control your smart home with natural language using AI. Supports **Anthropic Claude** (cloud) and **Ollama** (local) as LLM providers. Create and manage automations, scripts, scenes, and blueprints through voice commands or service calls.
+Control your smart home with natural language using AI. Supports **Anthropic Claude** (cloud), **Google Gemini** (cloud), and **Ollama** (local) as LLM providers. Create and manage automations, scripts, scenes, and blueprints through voice commands or service calls.
 
 ## Features
 
 - **Voice-controlled home management** - Describe what you want in natural language
-- **Dual LLM provider support** - Anthropic Claude (cloud) or Ollama (local/self-hosted)
+- **Multiple LLM providers** - Anthropic Claude (cloud), Google Gemini (cloud), or Ollama (local/self-hosted)
 - **24 built-in tools** - The AI can control devices, query states, read existing configs, and manage configurations
 - **Long-term memory** - A global, persistent memory of facts and preferences shared across every conversation, with automatic upkeep
 - **Blueprint support** - Create, read, edit, and delete reusable blueprint templates
@@ -60,6 +60,18 @@ Control your smart home with natural language using AI. Supports **Anthropic Cla
 5. Enter your **Anthropic API Key** (get one at https://console.anthropic.com/)
 6. Select your preferred **Claude model**
 7. Click **Submit**
+
+### Google Gemini (Cloud)
+
+1. Go to **Settings** > **Devices & Services**
+2. Click **+ ADD INTEGRATION**
+3. Search for **Voice Automation AI**
+4. Select **Google Gemini** as the provider
+5. Enter your **Gemini API Key** (get one at https://aistudio.google.com/)
+6. Select your preferred **Gemini model**
+7. Click **Submit**
+
+> Gemini is a cloud provider (your prompts are sent to Google). For a fully-local, private setup, use Ollama.
 
 ### Ollama (Local)
 
@@ -217,10 +229,10 @@ The assistant keeps a single, global memory shared across every conversation, so
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| Provider | Anthropic Claude or Ollama | Anthropic |
-| API Key | Anthropic API key (Claude only) | Required for Claude |
+| Provider | Anthropic Claude, Google Gemini, or Ollama | Anthropic |
+| API Key | Anthropic or Gemini API key (cloud providers) | Required for cloud |
 | Ollama Host | URL of Ollama instance | `http://localhost:11434` |
-| Model | LLM model to use | Claude Sonnet 4.6 / llama3.1 |
+| Model | LLM model to use | Claude Sonnet 4.6 / Gemini 2.5 Flash / llama3.1 |
 | Language | Language for AI responses | Auto-detected from HA |
 | Max Tokens | Maximum response tokens (256-32768) | 4096 |
 | History Turns | Conversation turns to remember (1-50) | 10 |
@@ -237,6 +249,12 @@ The assistant keeps a single, global memory shared across every conversation, so
 - **Claude Sonnet 4.6** (Recommended) - Best balance of speed and intelligence
 - **Claude Haiku 4.5** - Fastest and most economical
 - **Claude Sonnet 4.5** (Legacy)
+
+**Google Gemini:**
+- **Gemini 2.5 Flash** (Recommended) - Fast, capable, cost-effective
+- **Gemini 2.5 Pro** - Most capable
+- **Gemini 2.5 Flash-Lite** - Fastest and cheapest
+- **Gemini 3.5 Flash** - Latest
 
 **Ollama:**
 - Any model installed on your Ollama instance is auto-discovered

@@ -47,7 +47,7 @@ from .const import (
     OLLAMA_TIMEOUT,
     PLATFORMS,
     PROVIDER_ANTHROPIC,
-    PROVIDER_OLLAMA,
+    PROVIDER_GEMINI,
     SERVICE_ADD_MEMORY,
     SERVICE_CLEAR_MEMORIES,
     SERVICE_CREATE_AUTOMATION,
@@ -166,7 +166,7 @@ CLEAR_MEMORIES_SCHEMA = vol.Schema({
 def _build_llm_client_kwargs(config: dict) -> dict:
     """Build kwargs for create_llm_client from a config dict."""
     provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
-    if provider == PROVIDER_ANTHROPIC:
+    if provider in (PROVIDER_ANTHROPIC, PROVIDER_GEMINI):
         return {
             "api_key": config[CONF_API_KEY],
             "timeout": API_TIMEOUT,

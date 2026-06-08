@@ -27,6 +27,7 @@ from .const import (
     CONF_TOP_P,
     DEFAULT_ALLOW_SENSITIVE_ACTIONS,
     DEFAULT_ENABLE_MEMORY,
+    DEFAULT_GEMINI_MODEL,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_HISTORY_TURNS,
     DEFAULT_MAX_TOKENS,
@@ -36,10 +37,12 @@ from .const import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_PROVIDER,
     DOMAIN,
+    GEMINI_MODELS,
     LANGUAGES,
     OLLAMA_MODELS,
     PROVIDERS,
     PROVIDER_ANTHROPIC,
+    PROVIDER_GEMINI,
     PROVIDER_OLLAMA,
 )
 from .llm_client import OllamaClient, create_llm_client
@@ -97,6 +100,8 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._provider = user_input[CONF_PROVIDER]
             if self._provider == PROVIDER_ANTHROPIC:
                 return await self.async_step_anthropic()
+            if self._provider == PROVIDER_GEMINI:
+                return await self.async_step_gemini()
             return await self.async_step_ollama()
 
         return self.async_show_form(
@@ -154,6 +159,58 @@ class VoiceAutomationAIConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(CONF_API_KEY): str,
                 vol.Optional(CONF_MODEL, default=DEFAULT_MODEL): vol.In(ANTHROPIC_MODELS),
+            }),
+            errors=errors,
+        )
+
+    async def async_step_gemini(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2b: Google Gemini configuration."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                model = user_input.get(CONF_MODEL, DEFAULT_GEMINI_MODEL)
+                info = await validate_connection(
+                    self.hass,
+                    PROVIDER_GEMINI,
+                    api_key=user_input[CONF_API_KEY],
+                    model=model,
+                )
+
+                ha_language = self.hass.config.language
+                detected_language = ha_language if ha_language in LANGUAGES else DEFAULT_LANGUAGE
+
+                return self.async_create_entry(
+                    title=info["title"],
+                    data={
+                        CONF_PROVIDER: PROVIDER_GEMINI,
+                        CONF_API_KEY: user_input[CONF_API_KEY],
+                        CONF_MODEL: model,
+                        CONF_LANGUAGE: detected_language,
+                    },
+                    options={
+                        CONF_MODEL: model,
+                        CONF_LANGUAGE: detected_language,
+                        CONF_MAX_TOKENS: DEFAULT_MAX_TOKENS,
+                        CONF_MAX_HISTORY_TURNS: DEFAULT_MAX_HISTORY_TURNS,
+                    },
+                )
+
+            except ModelNotFound:
+                errors["base"] = "model_not_found"
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception as err:
+                _LOGGER.error("Unexpected error during Gemini setup: %s", type(err).__name__)
+                errors["base"] = "unknown"
+
+        return self.async_show_form(
+            step_id="gemini",
+            data_schema=vol.Schema({
+                vol.Required(CONF_API_KEY): str,
+                vol.Optional(CONF_MODEL, default=DEFAULT_GEMINI_MODEL): vol.In(GEMINI_MODELS),
             }),
             errors=errors,
         )
@@ -286,10 +343,14 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
                         self.hass, PROVIDER_OLLAMA, host=host, model=model,
                     )
                 else:
-                    model = user_input.get(CONF_MODEL, DEFAULT_MODEL)
+                    # Cloud providers (Anthropic, Gemini) validate by API key.
+                    fallback = (
+                        DEFAULT_GEMINI_MODEL if provider == PROVIDER_GEMINI else DEFAULT_MODEL
+                    )
+                    model = user_input.get(CONF_MODEL, fallback)
                     api_key = self._config_entry.data.get(CONF_API_KEY, "")
                     await validate_connection(
-                        self.hass, PROVIDER_ANTHROPIC,
+                        self.hass, provider,
                         api_key=api_key, model=model,
                     )
             except ModelNotFound:
@@ -307,6 +368,9 @@ class VoiceAutomationAIOptionsFlow(config_entries.OptionsFlow):
         if provider == PROVIDER_ANTHROPIC:
             model_options = dict(ANTHROPIC_MODELS)
             default_model = DEFAULT_MODEL
+        elif provider == PROVIDER_GEMINI:
+            model_options = dict(GEMINI_MODELS)
+            default_model = DEFAULT_GEMINI_MODEL
         else:
             # Host can be overridden in options, fall back to data, then default
             host = self._config_entry.options.get(

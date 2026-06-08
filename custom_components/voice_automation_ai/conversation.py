@@ -48,6 +48,7 @@ from .const import (
     DOMAIN,
     OLLAMA_TIMEOUT,
     PROVIDER_ANTHROPIC,
+    PROVIDER_GEMINI,
     PROVIDER_OLLAMA,
     SENSITIVE_ATTRIBUTE_KEYS,
     SENSITIVE_SERVICE_DOMAINS,
@@ -179,7 +180,7 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
         config = self._config
         provider = config.get(CONF_PROVIDER, DEFAULT_PROVIDER)
 
-        if provider == PROVIDER_ANTHROPIC:
+        if provider in (PROVIDER_ANTHROPIC, PROVIDER_GEMINI):
             key = (provider, config.get(CONF_API_KEY))
             kwargs = {
                 "api_key": config[CONF_API_KEY],
@@ -266,9 +267,9 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                 _LOGGER.error("Ollama connection error (host: %s): %s", host, err)
                 response_text = f"Ollama error: {err}"
             else:
-                _LOGGER.error("Anthropic API connection error: %s", err)
+                _LOGGER.error("%s connection error: %s", provider, err)
                 response_text = (
-                    "Sorry, I could not reach the Anthropic API. "
+                    "Sorry, I couldn't reach the AI service. "
                     "Please check your API key and internet connection."
                 )
         except TimeoutError as err:
@@ -281,9 +282,9 @@ class VoiceAutomationAIConversationAgent(ConversationEntity):
                     "Try a shorter request or check if the model is overloaded."
                 )
             else:
-                _LOGGER.error("Anthropic API request timed out: %s", err)
+                _LOGGER.error("%s request timed out: %s", provider, err)
                 response_text = (
-                    "Sorry, the Anthropic API took too long to respond. "
+                    "Sorry, the AI service took too long to respond. "
                     "Try a shorter request."
                 )
         except Exception as err:

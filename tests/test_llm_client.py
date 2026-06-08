@@ -1,6 +1,7 @@
 """Tests for LLM client abstraction layer."""
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,6 +12,7 @@ from custom_components.voice_automation_ai.llm_client import (
     TOOL_DEFINITIONS,
     AnthropicClient,
     BaseLLMClient,
+    GeminiClient,
     LLMResponse,
     OllamaClient,
     create_llm_client,
@@ -772,6 +774,130 @@ class TestOllamaAsyncFetchModels:
         assert models == {}
 
 
+# ── Gemini tool / content / response conversion ──
+
+
+class TestGeminiToolConversion:
+    """Test Gemini function-declaration conversion (no SDK needed)."""
+
+    def test_to_gemini_tools_shape(self):
+        client = GeminiClient.__new__(GeminiClient)
+        tools = client._to_gemini_tools()
+        assert len(tools) == 1
+        decls = tools[0]["function_declarations"]
+        assert len(decls) == 24
+        for d in decls:
+            assert "name" in d
+            assert "description" in d
+
+    def test_no_param_tool_omits_parameters(self):
+        client = GeminiClient.__new__(GeminiClient)
+        decls = client._to_gemini_tools()[0]["function_declarations"]
+        la = next(d for d in decls if d["name"] == "list_automations")
+        assert "parameters" not in la
+
+    def test_call_service_schema(self):
+        client = GeminiClient.__new__(GeminiClient)
+        decls = client._to_gemini_tools()[0]["function_declarations"]
+        cs = next(d for d in decls if d["name"] == "call_service")
+        props = cs["parameters"]["properties"]
+        assert "domain" in props
+        assert "entity_id" in props
+        assert "service_data" not in cs["parameters"]["required"]
+
+
+class TestGeminiContents:
+    def test_converts_roles(self):
+        contents = GeminiClient._to_gemini_contents([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        assert contents[0]["role"] == "user"
+        assert contents[0]["parts"][0]["text"] == "hi"
+        assert contents[1]["role"] == "model"
+
+    def test_passthrough_gemini_shaped_message(self):
+        gemini_msg = {"role": "user", "parts": [{"function_response": {"name": "x", "response": {}}}]}
+        contents = GeminiClient._to_gemini_contents([gemini_msg])
+        assert contents[0] is gemini_msg
+
+
+class TestGeminiParseResponse:
+    def test_text_response(self):
+        part = MagicMock()
+        part.function_call = None
+        part.text = "hello"
+        content = MagicMock()
+        content.parts = [part]
+        candidate = MagicMock()
+        candidate.content = content
+        response = MagicMock()
+        response.candidates = [candidate]
+
+        result = GeminiClient._parse_response(response)
+        assert result.text == "hello"
+        assert result.has_tool_calls is False
+
+    def test_tool_call_response(self):
+        fn = MagicMock()
+        fn.name = "call_service"
+        fn.args = {"domain": "light"}
+        fn.id = "g1"
+        part = MagicMock()
+        part.function_call = fn
+        part.text = None
+        content = MagicMock()
+        content.parts = [part]
+        candidate = MagicMock()
+        candidate.content = content
+        response = MagicMock()
+        response.candidates = [candidate]
+
+        result = GeminiClient._parse_response(response)
+        assert result.has_tool_calls is True
+        assert result.tool_calls[0]["name"] == "call_service"
+        assert result.tool_calls[0]["arguments"]["domain"] == "light"
+        assert result.tool_calls[0]["id"] == "g1"
+
+
+class TestGeminiTimeout:
+    async def test_call_generate_enforces_timeout(self):
+        client = GeminiClient.__new__(GeminiClient)
+        client._timeout = 0.01
+
+        async def _slow(*args, **kwargs):
+            await asyncio.sleep(1)
+
+        client._client = MagicMock()
+        client._client.aio.models.generate_content = _slow
+
+        with pytest.raises(TimeoutError):
+            await client._call_generate("gemini-2.5-flash", [], {})
+
+
+class TestGeminiAddToolResults:
+    def test_appends_model_and_function_response(self):
+        client = GeminiClient.__new__(GeminiClient)
+        messages: list = []
+        response = LLMResponse(
+            tool_calls=[{"id": "g1", "name": "list_automations", "arguments": {}}],
+            raw_assistant_message={
+                "role": "model",
+                "parts": [{"function_call": {"name": "list_automations", "args": {}}}],
+            },
+        )
+        tool_results = [{"tool_call_id": "g1", "content": '{"success": true}'}]
+
+        client.add_tool_results(messages, response, tool_results)
+
+        assert len(messages) == 2
+        assert messages[0]["role"] == "model"
+        assert messages[1]["role"] == "user"
+        fr = messages[1]["parts"][0]["function_response"]
+        assert fr["name"] == "list_automations"
+        assert fr["response"] == {"success": True}
+
+
 # ── Factory ──
 
 
@@ -796,6 +922,21 @@ class TestCreateLLMClientFactory:
         assert isinstance(client, OllamaClient)
         assert client._temperature == 0.7
         assert client._top_p == 0.9
+
+    def test_create_gemini_client(self):
+        # google-genai isn't installed in the test env, so stub the SDK import.
+        fake_genai = MagicMock()
+        fake_genai.Client.return_value = MagicMock()
+        fake_google = MagicMock()
+        fake_google.genai = fake_genai
+        with patch.dict(
+            "sys.modules",
+            {"google": fake_google, "google.genai": fake_genai},
+        ):
+            client = create_llm_client("gemini", api_key="g-key")
+        assert isinstance(client, GeminiClient)
+        assert client.is_async is True
+        fake_genai.Client.assert_called_once_with(api_key="g-key")
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError, match="Unknown LLM provider"):

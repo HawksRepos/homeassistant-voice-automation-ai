@@ -16,9 +16,11 @@ CONF_OLLAMA_HOST = "ollama_host"
 # Provider options
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_OLLAMA = "ollama"
+PROVIDER_GEMINI = "gemini"
 
 PROVIDERS = {
     PROVIDER_ANTHROPIC: "Anthropic Claude (Cloud API)",
+    PROVIDER_GEMINI: "Google Gemini (Cloud API)",
     PROVIDER_OLLAMA: "Ollama (Local LLM)",
 }
 
@@ -26,6 +28,7 @@ PROVIDERS = {
 DEFAULT_PROVIDER = PROVIDER_ANTHROPIC
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_LANGUAGE = "en"
 
@@ -75,6 +78,15 @@ ANTHROPIC_MODELS = {
     "claude-sonnet-4-6": "Claude Sonnet 4.6 (Recommended)",
     "claude-haiku-4-5": "Claude Haiku 4.5 (Fastest & cheapest)",
     "claude-sonnet-4-5-20250929": "Claude Sonnet 4.5 (Legacy)",
+}
+
+# Available Google Gemini models (user's previously-saved model is re-added to
+# the dropdown by the options flow, so trimming this list never strands installs).
+GEMINI_MODELS = {
+    "gemini-2.5-flash": "Gemini 2.5 Flash (Recommended)",
+    "gemini-2.5-pro": "Gemini 2.5 Pro (Most capable)",
+    "gemini-2.5-flash-lite": "Gemini 2.5 Flash-Lite (Fastest & cheapest)",
+    "gemini-3.5-flash": "Gemini 3.5 Flash (Latest)",
 }
 
 # Common Ollama models (user can also type a custom name)
